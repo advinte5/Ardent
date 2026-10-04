@@ -25,12 +25,23 @@
 //                             There is no most-recent-engagement to fall back
 //                             to, and a session holds one engagement at a time.
 //
-// The journal is authoritative. `engagement` objects in memory are a
-// projection rebuilt by replay on open, which is why `close()` followed by
-// `open()` must produce byte-identical state (see test/ardent-application.test.ts).
+// The journals are authoritative — one per engagement, in the plan's layout:
+//
+//   <engagementsDir>/<engagementId>/
+//     events.jsonl          the engagement's own append-only journal (+ .lock)
+//     engagement.json       rebuildable manifest/projection, never authority
+//     artifacts/sha256/…    content-addressed bytes for this engagement only
+//
+// `engagements` in memory is a projection rebuilt by replay on open, which is
+// why `close()` followed by `open()` must produce byte-identical state (see
+// test/ardent-application.test.ts). One engagement's events never sit in
+// another engagement's file, so "which engagement did this commit to" is a
+// path, not a filter, and a second writer is excluded per engagement rather
+// than process-wide.
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
-import { ArtifactStore, Journal, JournalLock, type JournalEntry } from "./io";
+import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { ArtifactStore, Journal, JournalLock, type JournalEntry, type JournalOptions } from "./io";
 import {
   canTransition,
   commandError,
@@ -42,6 +53,11 @@ import {
   type Scope,
   type SessionBinding,
 } from "./types";
+
+/** The authoritative file inside `<engagementsDir>/<engagementId>/`. */
+const JOURNAL_NAME = "events.jsonl";
+/** The derived projection beside it — written, never read back as authority. */
+const MANIFEST_NAME = "engagement.json";
 
 /**
  * Events written to the journal. Each carries the engagement revision *after*
@@ -73,35 +89,50 @@ interface AppliedCommand {
 }
 
 export interface EngagementStoreOptions {
-  /** Authoritative journal path (JSONL, one command batch per line). */
-  journalPath: string;
-  /** Lock path. Defaults to `<journalPath>.lock`. */
-  lockPath?: string;
-  /** Artifact directory. Defaults to `<dirname(journalPath)>/artifacts`. */
-  artifactDir?: string;
+  /**
+   * Plan layout root: one subdirectory per engagement, created on demand —
+   * `<engagementsDir>/<engagementId>/{events.jsonl, events.jsonl.lock,
+   * engagement.json, artifacts/sha256/…}`.
+   */
+  engagementsDir: string;
   /** Injected clock for deterministic tests. */
   now?: () => number;
   /** Injected engagement-id factory (tests want readable, ordered ids). */
   idFactory?: () => string;
   /**
-   * Fault injection for the journal's writes and flushes, so write faults
+   * Fault injection for every journal's writes and flushes, so write faults
    * (ENOSPC, EIO) can be tested without a failing disk.
    */
   write?: (fd: number, data: string) => void;
   fsync?: (fd: number) => void;
+  /**
+   * Fault injection for the *derived* `engagement.json` write only — the
+   * journal must not depend on it, and that is worth a test.
+   */
+  manifest?: (path: string, data: string) => void;
 }
 
 /**
- * The engagement repository: commands in, journal out, projection back.
+ * The engagement repository: commands in, per-engagement journals out,
+ * projection back.
  *
- * One instance is one writer. `open()` takes the single-writer lock and
- * replays the journal; a second instance on the same path is refused before it
- * can mutate anything.
+ * One instance holds every engagement's single-writer lock — taken at
+ * `open()` for whatever the tree already contains, and at creation for
+ * engagements made afterwards. So one process owns the Ardent tree and a
+ * second one is refused before it can mutate anything (the plan's "explicitly
+ * reject unsupported concurrent processes"), while each lock still names its
+ * own engagement, its own pid and its own start time: an operator can see
+ * *which* engagement a crashed writer held and clear exactly that lock.
  */
 export class EngagementStore {
-  readonly journal: Journal<EngagementEvent>;
-  readonly lock: JournalLock;
-  readonly artifacts: ArtifactStore;
+  /** Plan layout root: `<engagementsDir>/<engagementId>/…`. */
+  readonly engagementsDir: string;
+
+  private readonly journalOpts: JournalOptions;
+  private readonly manifestWrite: (path: string, data: string) => void;
+  private readonly journals = new Map<string, Journal<EngagementEvent>>();
+  private readonly locks = new Map<string, JournalLock>();
+  private readonly artifactStores = new Map<string, ArtifactStore>();
 
   private readonly now: () => number;
   private readonly idFactory: () => string;
@@ -111,18 +142,24 @@ export class EngagementStore {
   private applied = new Map<string, AppliedCommand>();
   private ready = false;
   private fault: { code: ErrorCode; message: string } | undefined;
+  /**
+   * Last failure writing a derived `engagement.json`. The journal does not
+   * care — the manifest is a projection anyone can rebuild — but a silently
+   * missing manifest is still a missing file someone will go looking for, so
+   * it is kept where `/ardent` can report it.
+   */
+  private manifestFault: string | undefined;
 
   constructor(opts: EngagementStoreOptions) {
-    const lockPath = opts.lockPath ?? `${opts.journalPath}.lock`;
-    this.journal = new Journal<EngagementEvent>(opts.journalPath, {
-      now: opts.now ?? Date.now,
-      ...(opts.write === undefined ? {} : { write: opts.write }),
-      ...(opts.fsync === undefined ? {} : { fsync: opts.fsync }),
-    });
-    this.lock = new JournalLock(lockPath, opts.now === undefined ? {} : { now: opts.now });
-    this.artifacts = new ArtifactStore(opts.artifactDir ?? join(dirname(opts.journalPath), "artifacts"));
+    this.engagementsDir = opts.engagementsDir;
     this.now = opts.now ?? Date.now;
     this.idFactory = opts.idFactory ?? (() => `eng-${randomUUID()}`);
+    this.journalOpts = {
+      now: this.now,
+      ...(opts.write === undefined ? {} : { write: opts.write }),
+      ...(opts.fsync === undefined ? {} : { fsync: opts.fsync }),
+    };
+    this.manifestWrite = opts.manifest ?? ((path, data) => writeFileSync(path, data));
   }
 
   // -----------------------------------------------------------------------
@@ -130,29 +167,42 @@ export class EngagementStore {
   // -----------------------------------------------------------------------
 
   /**
-   * Take the writer lock, read and validate the journal, replay it into the
-   * projection. If the lock was taken but the journal cannot be read or
-   * replayed, the lock is *kept* — recovery needs exclusivity too — until
-   * `close()`. The caller is expected to recover or close, not to abandon a
-   * held lock. A lock held by another writer is never taken in the first
-   * place: that failure leaves the other writer's lock untouched.
+   * Take every engagement's writer lock, read and validate each journal, and
+   * replay them all into the projection. If a lock was taken but that
+   * engagement's journal cannot be read or replayed, the locks are *kept* —
+   * recovery needs exclusivity too — until `close()`. The caller is expected
+   * to recover or close, not to abandon a held lock. A lock held by another
+   * writer is never taken in the first place: that failure leaves the other
+   * writer's lock untouched.
    */
   open(): CommandResult<void> {
-    if (this.ready) return commandOk(undefined, this.journal.entries.length);
+    if (this.ready) return commandOk(undefined, this.committedBatches);
 
-    const lock = this.lock.acquire();
-    if (!lock.ok) {
-      this.fault = { code: lock.code, message: lock.message };
-      return commandError(lock.code, lock.message);
+    let ids: string[];
+    try {
+      mkdirSync(this.engagementsDir, { recursive: true });
+      ids = readdirSync(this.engagementsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+    } catch (err) {
+      const message = `engagement directory ${this.engagementsDir} could not be read: ${err instanceof Error ? err.message : String(err)}`;
+      this.fault = { code: "storage_unavailable", message };
+      return commandError("storage_unavailable", message);
     }
 
-    const opened = this.journal.open();
-    if (!opened.ok) {
-      this.fault = { code: opened.code, message: opened.message };
-      return commandError(opened.code, opened.message);
+    for (const id of ids) {
+      // A directory with no journal is not an engagement — an interrupted
+      // create, or something else's file. Nothing to replay, nothing to lock.
+      if (!existsSync(join(this.engagementsDir, id, JOURNAL_NAME))) continue;
+      const ensured = this.#ensureStorage(id);
+      if (!ensured.ok) {
+        this.fault = { code: ensured.code, message: ensured.message };
+        return commandError(ensured.code, ensured.message);
+      }
     }
 
-    const rebuilt = this.#rebuild(opened.entries);
+    const rebuilt = this.#replayAll();
     if (rebuilt !== undefined) {
       this.fault = { code: rebuilt.code, message: rebuilt.message };
       return commandError(rebuilt.code, rebuilt.message);
@@ -160,16 +210,26 @@ export class EngagementStore {
 
     this.fault = undefined;
     this.ready = true;
-    return commandOk(undefined, opened.entries.length);
+    return commandOk(undefined, this.committedBatches);
   }
 
-  /** Release the lock and the file handle. Safe to call on a failed open. */
+  /** Release every lock and file handle. Safe to call on a failed open. */
   close(): CommandResult<void> {
-    this.journal.close();
+    const batches = this.committedBatches;
+    let firstError: CommandResult<never> | undefined;
+    for (const journal of this.journals.values()) journal.close();
+    for (const [id, lock] of this.locks) {
+      const released = lock.release();
+      if (!released.ok && firstError === undefined) {
+        firstError = commandError(released.code, `engagement ${id}: ${released.message}`);
+      }
+    }
+    this.journals.clear();
+    this.locks.clear();
+    this.artifactStores.clear();
     this.ready = false;
-    const released = this.lock.release();
-    if (!released.ok) return commandError(released.code, released.message);
-    return commandOk(undefined, this.journal.entries.length);
+    if (firstError !== undefined) return firstError;
+    return commandOk(undefined, batches);
   }
 
   get isOpen(): boolean {
@@ -177,24 +237,72 @@ export class EngagementStore {
   }
 
   /**
-   * Explicit recovery for a journal left mid-record by a crash. Returns the
-   * bytes that were discarded so the loss is visible to whoever asked for it,
-   * then reopens the store ready for commands.
+   * Explicit recovery for *one engagement's* journal left mid-record by a
+   * crash. Returns the bytes that were discarded so the loss is visible to
+   * whoever asked for it, then rebuilds the projection from every journal and
+   * leaves the store ready for commands.
    */
-  recoverTail(): CommandResult<string> {
-    const recovered = this.journal.recoverIncompleteTail();
+  recoverTail(engagementId: string): CommandResult<string> {
+    const journal = this.journals.get(engagementId);
+    if (journal === undefined) {
+      return commandError(
+        "not_found",
+        `engagement ${engagementId} has no open journal; open() first — its lock has to be held before its file is rewritten`,
+      );
+    }
+
+    const recovered = journal.recoverIncompleteTail();
     if (!recovered.ok) return commandError(recovered.code, recovered.message);
 
     // Recovery restores the *file*; the projection still has to be rebuilt
-    // from what survived, or the store would be ready but empty.
-    const rebuilt = this.#rebuild(this.journal.entries);
+    // from what survived, or the store would be ready but wrong. Replay is
+    // whole-store because `applied` (duplicate command ids) spans journals.
+    const rebuilt = this.#replayAll();
     if (rebuilt !== undefined) {
       this.fault = { code: rebuilt.code, message: rebuilt.message };
       return commandError(rebuilt.code, rebuilt.message);
     }
     this.fault = undefined;
     this.ready = true;
-    return commandOk(recovered.discarded, this.journal.entries.length);
+    return commandOk(recovered.discarded, this.committedBatches);
+  }
+
+  /** The plan layout's directory for one engagement. */
+  engagementDir(engagementId: string): string {
+    return join(this.engagementsDir, engagementId);
+  }
+
+  /** `<dir>/events.jsonl` for one engagement — the authoritative file. */
+  journalPathFor(engagementId: string): string {
+    return join(this.engagementDir(engagementId), JOURNAL_NAME);
+  }
+
+  /** That engagement's writer lock, when the store holds it. */
+  lockFor(engagementId: string): JournalLock | undefined {
+    return this.locks.get(engagementId);
+  }
+
+  /** Where that engagement's lock file lives — for status and operator recovery. */
+  lockPathFor(engagementId: string): string {
+    return `${this.journalPathFor(engagementId)}.lock`;
+  }
+
+  /**
+   * Content-addressed bytes for one engagement: `<dir>/artifacts/sha256/…`.
+   * An engagement's artifacts are as scoped as its events — evidence about
+   * one target never lands in another engagement's tree.
+   */
+  artifactsFor(engagementId: string): ArtifactStore {
+    const existing = this.artifactStores.get(engagementId);
+    if (existing !== undefined) return existing;
+    const store = new ArtifactStore(join(this.engagementDir(engagementId), "artifacts", "sha256"));
+    this.artifactStores.set(engagementId, store);
+    return store;
+  }
+
+  /** Last derived-manifest write failure, if any. The journal does not care. */
+  get manifestError(): string | undefined {
+    return this.manifestFault;
   }
 
   // -----------------------------------------------------------------------
@@ -223,12 +331,19 @@ export class EngagementStore {
   }
 
   /**
-   * Number of committed command batches — one per journal line. Deliberately
-   * named for what it counts: an engagement's `revision` is per-engagement and
-   * these are not the same number.
+   * Committed command batches across every open journal — one per journal
+   * line. Deliberately named for what it counts: an engagement's `revision`
+   * is per-engagement and these are not the same number.
    */
   get committedBatches(): number {
-    return this.journal.entries.length;
+    let total = 0;
+    for (const journal of this.journals.values()) total += journal.entries.length;
+    return total;
+  }
+
+  /** Committed batches in one engagement's journal (0 when it has none). */
+  batchesFor(engagementId: string): number {
+    return this.journals.get(engagementId)?.entries.length ?? 0;
   }
 
   // -----------------------------------------------------------------------
@@ -643,7 +758,12 @@ export class EngagementStore {
     const invalid = validateBatch(input.events, (id) => this.engagements.get(id));
     if (invalid !== undefined) return commandError(invalid.code, invalid.message);
 
-    const appended = this.journal.append({
+    // The subject's journal, created and locked on demand for a brand-new
+    // engagement: its very first batch is what makes it an engagement at all.
+    const storage = this.#ensureStorage(input.subjectId);
+    if (!storage.ok) return storage;
+
+    const appended = storage.value.append({
       commandId: input.commandId,
       payloadHash: input.hash,
       events: input.events,
@@ -651,6 +771,10 @@ export class EngagementStore {
     if (!appended.ok) return commandError(appended.code, appended.message);
 
     this.#project(input.events);
+    // Derived, after the authoritative write: a manifest that fails to be
+    // written is reported (manifestError), never allowed to make a committed
+    // command look uncommitted.
+    this.#writeManifest(input.subjectId);
     const subject = this.engagements.get(input.subjectId);
     const revision = subject?.revision ?? 0;
     this.applied.set(input.commandId, {
@@ -662,21 +786,126 @@ export class EngagementStore {
     return commandOk(undefined, revision);
   }
 
-  /** Rebuild the projection from committed records. */
-  #rebuild(entries: readonly JournalEntry<EngagementEvent>[]): BatchError | undefined {
+  /**
+   * Directory, lock and journal handle for an engagement, created once.
+   * Returns the lock error when another writer holds that engagement: the
+   * command is refused *before* a byte is written, which is the whole point
+   * of taking the lock before the append rather than after it.
+   */
+  #ensureStorage(engagementId: string): CommandResult<Journal<EngagementEvent>> {
+    const existing = this.journals.get(engagementId);
+    if (existing !== undefined) return commandOk(existing, this.batchesFor(engagementId));
+
+    const dir = this.engagementDir(engagementId);
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch (err) {
+      return commandError(
+        "storage_unavailable",
+        `engagement ${engagementId} could not be created at ${dir}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const journalPath = join(dir, JOURNAL_NAME);
+    const lock = new JournalLock(`${journalPath}.lock`, this.now === undefined ? {} : { now: this.now });
+    const acquired = lock.acquire();
+    if (!acquired.ok) return commandError(acquired.code, `engagement ${engagementId}: ${acquired.message}`);
+
+    const journal = new Journal<EngagementEvent>(journalPath, this.journalOpts);
+    this.journals.set(engagementId, journal);
+    this.locks.set(engagementId, lock);
+
+    // A journal that cannot be read leaves its lock *held*: recovery needs
+    // exclusivity too, and close() is the way out.
+    const opened = journal.open();
+    if (!opened.ok) return commandError(opened.code, `engagement ${engagementId}: ${opened.message}`);
+    return commandOk(journal, journal.entries.length);
+  }
+
+  /**
+   * Write the derived `engagement.json` manifest — projection only, rebuilt
+   * from the journal at any time. Written by temp-file + rename so a crash
+   * mid-write leaves the previous manifest intact rather than a half-written
+   * one, and never read back: authority is the journal, always.
+   */
+  #writeManifest(engagementId: string): void {
+    const engagement = this.engagements.get(engagementId);
+    if (engagement === undefined) return;
+    const manifest = {
+      schema: 1,
+      writtenAt: this.now(),
+      engagement: this.#readEngagement(engagementId),
+      bindings: this.bindings(engagementId),
+    };
+    const path = join(this.engagementDir(engagementId), MANIFEST_NAME);
+    const temp = `${path}.tmp-${randomUUID()}`;
+    try {
+      this.manifestWrite(temp, `${JSON.stringify(manifest, null, 2)}\n`);
+      renameSync(temp, path);
+      this.manifestFault = undefined;
+    } catch (err) {
+      this.manifestFault = `engagement ${engagementId}: manifest not written (${err instanceof Error ? err.message : String(err)})`;
+      try {
+        if (existsSync(temp)) unlinkSync(temp);
+      } catch {
+        // leaving a temp file behind is safer than masking the original error
+      }
+    }
+  }
+
+  /**
+   * Replay every open journal into a clean projection. Whole-store rather
+   * than per-journal because `applied` spans journals: the same command id
+   * committed in two engagement's files is a real conflict, and only a
+   * full pass can see it.
+   */
+  #replayAll(): BatchError | undefined {
+    this.engagements.clear();
+    this.bindingRecords = [];
+    this.applied.clear();
+
+    const ids = [...this.journals.keys()].sort();
+    for (const id of ids) {
+      const failure = this.#replay(id, this.journals.get(id)!.entries);
+      if (failure !== undefined) return failure;
+    }
+    return undefined;
+  }
+
+  /** Rebuild the projection from one engagement's committed records. */
+  #replay(engagementId: string, entries: readonly JournalEntry<EngagementEvent>[]): BatchError | undefined {
     for (const entry of entries) {
       if (entry.commandId !== undefined && this.applied.has(entry.commandId)) {
-        return { code: "corrupt_store", message: `command ${entry.commandId} was committed twice in the journal` };
+        const previous = this.applied.get(entry.commandId)!;
+        const detail =
+          previous.engagementId === engagementId
+            ? "committed twice in the journal"
+            : `already committed by engagement ${previous.engagementId}; a command id is global, so two engagements cannot share one`;
+        return { code: "corrupt_store", message: `command ${entry.commandId} was ${detail}` };
       }
 
       const invalid = validateBatch(entry.events, (id) => this.engagements.get(id));
       if (invalid !== undefined) {
-        return { code: invalid.code, message: `journal record ${entry.seq}: ${invalid.message}` };
+        return { code: invalid.code, message: `engagement ${engagementId} journal record ${entry.seq}: ${invalid.message}` };
       }
+
+      // An engagement's events live in its own journal. Without this, a file
+      // holding another engagement's commands would replay into a projection
+      // whose next command then appends somewhere else — two files for one
+      // history, which no lock or revision could ever reconcile.
+      const subject = subjectOf(entry.events);
+      if (subject !== engagementId) {
+        return {
+          code: "corrupt_store",
+          message:
+            `engagement ${engagementId} journal record ${entry.seq} commands engagement ${subject}; ` +
+            `an engagement's events live in its own journal`,
+        };
+      }
+
       this.#project(entry.events);
 
       if (entry.commandId !== undefined) {
-        const subject = subjectOf(entry.events);
         const sessionId = sessionSubjectOf(entry.events);
         this.applied.set(entry.commandId, {
           // A record written without a payload hash can still be replayed, but

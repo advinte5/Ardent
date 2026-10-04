@@ -590,6 +590,32 @@ Three rules are what make the journal worth having:
   and commits nothing; reusing an id for a *different* payload is `validation`.
   A retry after a timeout cannot quietly become two engagements.
 
+**Layout** — the plan's, one directory per engagement under
+`<agentDir>/ardent/engagements/`:
+
+```
+engagements/<engagementId>/
+  events.jsonl          authoritative: one command batch per line, fsync'd
+  events.jsonl.lock     single writer (pid / host / since; clear() is explicit)
+  engagement.json       derived projection — written, never read as authority
+  artifacts/sha256/…    this engagement's bytes only, content-addressed
+```
+
+The journal decides what an engagement is; `engagement.json` is written beside
+it after every commit (temp file → rename, so a crash leaves the previous
+manifest rather than a half-written one) purely so a human or another tool can
+read the state without replaying. **Replay never reads it** — a test deletes
+the manifest and reopens, and gets the same engagement back. A manifest that
+cannot be written does not uncommit a command: the journal already did, and
+the failure is reported through `EngagementStore.manifestError`. Each
+engagement's events live in *its own* file, and replay refuses a journal whose
+commands name a different engagement — otherwise one engagement's history
+would end up split across two files.
+
+Artifacts are addressed by content but stored per engagement
+(`artifacts/sha256/<aa>/<digest>`: the plan's address namespace plus a
+two-char fan-out so a directory cannot grow to tens of thousands of entries).
+
 Ownership specifics:
 
 - An engagement is created `draft` with objective, authorization reference and

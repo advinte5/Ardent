@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { EngagementStore, type EngagementStoreOptions } from "../src/ardent/application";
-import { JOURNAL_SCHEMA_VERSION } from "../src/ardent/io";
+import { JOURNAL_SCHEMA_VERSION, JournalLock } from "../src/ardent/io";
 import { parseScope } from "../src/ardent/scope";
 import type { CommandResult, Engagement, ErrorCode } from "../src/ardent/types";
 
@@ -16,10 +16,21 @@ function scratch(): string {
 function makeStore(dir: string, opts: Partial<EngagementStoreOptions> = {}): EngagementStore {
   let clock = 1_700_000_000_000;
   return new EngagementStore({
-    journalPath: join(dir, "journal.jsonl"),
+    engagementsDir: join(dir, "engagements"),
     now: () => (clock += 1),
     ...opts,
   });
+}
+
+/**
+ * Pre-seed one engagement's journal with hand-written bytes, exactly where the
+ * plan layout says it lives: `<dir>/engagements/<id>/events.jsonl`.
+ */
+function seedJournal(dir: string, engagementId: string, contents: string): string {
+  const path = join(dir, "engagements", engagementId, "events.jsonl");
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents);
+  return path;
 }
 
 function ok<T>(result: CommandResult<T>): T {
@@ -370,22 +381,45 @@ describe("EngagementStore: single writer", () => {
     try {
       const crashed = makeStore(dir);
       ok(crashed.open());
-      ok(crashed.createEngagement(newEngagement("c1")));
+      const created = ok(crashed.createEngagement(newEngagement("c1")));
       // No close(): the process died holding the lock.
 
       const next = makeStore(dir);
       const refused = failure(next.open());
       expect(refused.code).toBe("locked");
       expect(refused.message).toContain("pid");
+      // The lock that refused us is not ours: we never took it.
+      expect(next.lockFor(created.id)).toBeUndefined();
 
       // Age alone must not release it — an operator clears it deliberately.
-      expect(next.lock.inspect()?.pid).toBe(process.pid);
-      expect(next.lock.clear().ok).toBe(true);
-      expect(next.lock.inspect()).toBeUndefined();
+      const held = new JournalLock(next.lockPathFor(created.id));
+      expect(held.inspect()?.pid).toBe(process.pid);
+      expect(held.clear().ok).toBe(true);
+      expect(held.inspect()).toBeUndefined();
 
       ok(next.open());
       expect(next.listEngagements()).toHaveLength(1);
       ok(next.close());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("each engagement gets its own lock file, and this store holds them all", () => {
+    const dir = scratch();
+    try {
+      const store = makeStore(dir);
+      ok(store.open());
+      const a = ok(store.createEngagement(newEngagement("c1")));
+      const b = ok(store.createEngagement(newEngagement("c2")));
+
+      // One lock per engagement, each naming this pid — and the path is the
+      // plan layout, not a sidecar next to a shared file.
+      expect(store.lockPathFor(a.id)).toBe(join(dir, "engagements", a.id, "events.jsonl.lock"));
+      expect(store.lockFor(a.id)?.inspect()?.pid).toBe(process.pid);
+      expect(store.lockFor(b.id)?.inspect()?.pid).toBe(process.pid);
+      ok(store.close());
+      expect(store.lockFor(a.id)).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -448,12 +482,12 @@ describe("EngagementStore: replay", () => {
   test("a corrupt journal blocks every command rather than skipping the damage", () => {
     const dir = scratch();
     try {
-      const path = join(dir, "journal.jsonl");
-      writeFileSync(path, `${line(1, [createdEvent("eng-1")], { commandId: "c1", payloadHash: "h1" })}garbage\n`);
+      seedJournal(dir, "eng-1", `${line(1, [createdEvent("eng-1")], { commandId: "c1", payloadHash: "h1" })}garbage\n`);
 
       const store = makeStore(dir);
       const refused = failure(store.open());
       expect(refused.code).toBe("corrupt_store");
+      expect(refused.message).toContain("engagement eng-1");
       expect(refused.message).toContain("line 2");
 
       const command = failure(store.createEngagement(newEngagement("c9")));
@@ -468,8 +502,9 @@ describe("EngagementStore: replay", () => {
   test("a record from a newer build blocks with unsupported_schema", () => {
     const dir = scratch();
     try {
-      writeFileSync(
-        join(dir, "journal.jsonl"),
+      seedJournal(
+        dir,
+        "eng-1",
         `${line(1, [createdEvent("eng-1")], { commandId: "c1", payloadHash: "h1" })}${line(2, [{ type: "future.event" }], { v: 99 })}`,
       );
       const store = makeStore(dir);
@@ -485,13 +520,13 @@ describe("EngagementStore: replay", () => {
     const dir = scratch();
     try {
       const partial = '{"v":1,"seq":2,"ts":2002,"commandId":"c2","events":[{"type":"engagement.lifecycle"';
-      writeFileSync(join(dir, "journal.jsonl"), `${line(1, [createdEvent("eng-1")], { commandId: "c1", payloadHash: "h1" })}${partial}`);
+      seedJournal(dir, "eng-1", `${line(1, [createdEvent("eng-1")], { commandId: "c1", payloadHash: "h1" })}${partial}`);
 
       const store = makeStore(dir);
       expect(failure(store.open()).code).toBe("incomplete_tail");
       expect(failure(store.createEngagement(newEngagement("c9"))).code).toBe("incomplete_tail");
 
-      const recovered = ok(store.recoverTail());
+      const recovered = ok(store.recoverTail("eng-1"));
       expect(recovered).toBe(partial);
 
       // The records that survived are back, and the store is usable again.
@@ -509,10 +544,8 @@ describe("EngagementStore: replay", () => {
   test("a command id committed twice is corruption, not a replay", () => {
     const dir = scratch();
     try {
-      writeFileSync(
-        join(dir, "journal.jsonl"),
-        `${line(1, [createdEvent("eng-1")], { commandId: "dup", payloadHash: "h1" })}${line(2, [createdEvent("eng-2")], { commandId: "dup", payloadHash: "h1" })}`,
-      );
+      seedJournal(dir, "eng-1", line(1, [createdEvent("eng-1")], { commandId: "dup", payloadHash: "h1" }));
+      seedJournal(dir, "eng-2", line(1, [createdEvent("eng-2")], { commandId: "dup", payloadHash: "h1" }));
       const store = makeStore(dir);
       const refused = failure(store.open());
       expect(refused.code).toBe("corrupt_store");
@@ -526,7 +559,7 @@ describe("EngagementStore: replay", () => {
   test("a batch that spans two engagements is rejected on replay", () => {
     const dir = scratch();
     try {
-      writeFileSync(join(dir, "journal.jsonl"), line(1, [createdEvent("eng-1"), createdEvent("eng-2")]));
+      seedJournal(dir, "eng-1", line(1, [createdEvent("eng-1"), createdEvent("eng-2")]));
       const store = makeStore(dir);
       const refused = failure(store.open());
       expect(refused.code).toBe("corrupt_store");
@@ -540,8 +573,9 @@ describe("EngagementStore: replay", () => {
   test("an event naming an unknown engagement is rejected on replay", () => {
     const dir = scratch();
     try {
-      writeFileSync(
-        join(dir, "journal.jsonl"),
+      seedJournal(
+        dir,
+        "eng-1",
         line(1, [{ type: "engagement.lifecycle", by: "t", id: "eng-missing", from: "draft", to: "active", revision: 2, ts: 5 }]),
       );
       const store = makeStore(dir);
@@ -549,6 +583,132 @@ describe("EngagementStore: replay", () => {
       expect(refused.code).toBe("corrupt_store");
       expect(refused.message).toContain("eng-missing");
       store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("EngagementStore: plan layout", () => {
+  test("every engagement gets its own directory: journal, lock and manifest", () => {
+    const dir = scratch();
+    try {
+      const store = makeStore(dir);
+      ok(store.open());
+      const a = ok(store.createEngagement(newEngagement("c1", "s1")));
+      const b = ok(store.createEngagement(newEngagement("c2")));
+
+      for (const engagement of [a, b]) {
+        const home = join(dir, "engagements", engagement.id);
+        expect(existsSync(join(home, "events.jsonl"))).toBe(true);
+        expect(existsSync(join(home, "events.jsonl.lock"))).toBe(true);
+        expect(existsSync(join(home, "engagement.json"))).toBe(true);
+        expect(store.journalPathFor(engagement.id)).toBe(join(home, "events.jsonl"));
+      }
+
+      // Two engagements, two journals — never one file with both histories in it.
+      expect(store.batchesFor(a.id)).toBe(1);
+      expect(store.batchesFor(b.id)).toBe(1);
+      expect(store.committedBatches).toBe(2);
+      ok(store.close());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("engagement.json is a projection: written beside the journal, matching it", () => {
+    const dir = scratch();
+    try {
+      const store = makeStore(dir);
+      ok(store.open());
+      const a = ok(store.createEngagement(newEngagement("c1", "s1")));
+      ok(store.bindSession({ commandId: "c2", engagementId: a.id, sessionId: "s2" }));
+
+      const manifestPath = join(dir, "engagements", a.id, "engagement.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      expect(manifest.schema).toBe(1);
+      expect(manifest.engagement.id).toBe(a.id);
+      expect(manifest.engagement.revision).toBe(a.revision + 1);
+      expect(manifest.bindings.map((entry: { sessionId: string }) => entry.sessionId).sort()).toEqual(["s1", "s2"]);
+
+      // Reopening replays the journal, not the manifest: the file is a cache
+      // anyone can delete. Removing it must change nothing.
+      rmSync(manifestPath);
+      ok(store.close());
+      const reopened = makeStore(dir);
+      ok(reopened.open());
+      expect(reopened.getEngagement(a.id)?.revision).toBe(a.revision + 1);
+      expect(reopened.bindings(a.id)).toHaveLength(2);
+      ok(reopened.close());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a manifest that cannot be written does not uncommit the command", () => {
+    const dir = scratch();
+    try {
+      const store = makeStore(dir, {
+        manifest: () => {
+          throw Object.assign(new Error("EACCES: manifest denied"), { code: "EACCES" });
+        },
+      });
+      ok(store.open());
+      const a = ok(store.createEngagement(newEngagement("c1")));
+
+      // The journal is authority, so the command stands and the projection is
+      // right; what is wrong is the derived file, and that is reported.
+      expect(store.getEngagement(a.id)?.id).toBe(a.id);
+      expect(store.manifestError).toContain("manifest not written");
+      expect(store.manifestError).toContain(a.id);
+      expect(existsSync(join(dir, "engagements", a.id, "engagement.json"))).toBe(false);
+      expect(store.batchesFor(a.id)).toBe(1);
+
+      ok(store.close());
+      const reopened = makeStore(dir);
+      ok(reopened.open());
+      expect(reopened.getEngagement(a.id)).toBeDefined();
+      expect(reopened.manifestError).toBeUndefined(); // a later store writes it again
+      ok(reopened.close());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("artifacts are addressed inside their own engagement's tree", () => {
+    const dir = scratch();
+    try {
+      const store = makeStore(dir);
+      ok(store.open());
+      const a = ok(store.createEngagement(newEngagement("c1")));
+      const b = ok(store.createEngagement(newEngagement("c2")));
+
+      const written = store.artifactsFor(a.id).write("hello");
+      expect(written.ok).toBe(true);
+      if (!written.ok) return;
+      expect(written.path.startsWith(join(dir, "engagements", a.id, "artifacts", "sha256"))).toBe(true);
+      expect(existsSync(written.path)).toBe(true);
+      // Addressed by content, not by engagement — but stored per engagement.
+      expect(store.artifactsFor(b.id).exists(written.sha256)).toBe(false);
+      expect(store.artifactsFor(a.id).read(written.sha256).ok).toBe(true);
+      ok(store.close());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a refused command creates no engagement directory", () => {
+    const dir = scratch();
+    try {
+      const store = makeStore(dir);
+      ok(store.open());
+      const refused = failure(store.createEngagement({ ...newEngagement("c1"), objective: "   " }));
+      expect(refused.code).toBe("validation");
+      expect(store.listEngagements()).toHaveLength(0);
+      // Nothing validated, so nothing was created: no orphan half-engagement.
+      expect(existsSync(join(dir, "engagements"))).toBe(true);
+      expect(readdirSync(join(dir, "engagements"))).toEqual([]);
+      ok(store.close());
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
