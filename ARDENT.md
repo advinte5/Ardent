@@ -5,7 +5,9 @@ free-pi harness. It keeps the free-pi provider (ad-funded inference) and the ads
 extension unchanged, and adds scope enforcement, an approval gate, working
 memory, and an evidence store.
 
-This document describes **Phase 1 (host-only)** plus the Phase 2 subagent layer.
+This document describes **Phase 1 (host-only)** plus the Phase 2 subagent layer,
+and engagement-plan slices P1 (strict citations, proof-gated verification) and
+P2 (durable engagement ownership: journal, lock, artifacts).
 It is a prototype living in the mirrored `free-pi-cli` repo; see "Porting" below
 before relying on it.
 
@@ -21,7 +23,8 @@ before relying on it.
 | `src/ardent/prompt.ts` | The engagement brief injected before each turn |
 | `src/ardent/refusal.ts` | Refusal detection (first-person only) + the bounded one-shot authorization recovery message |
 | `src/ardent/config.ts` | Engagement config parsing (`enabled`, `targets`, `label`) |
-| `src/ardent/io.ts` | Config loader + JSONL evidence sink |
+| `src/ardent/io.ts` | Config loader + JSONL evidence sink, plus the durable primitives: `Journal` (fsync'd append-only batches), `JournalLock` (single writer), `ArtifactStore` (content-addressed bytes) |
+| `src/ardent/application.ts` | Engagement commands over the journal: ownership ids, lifecycle, session bindings, idempotent `commandId`s, revisions, replay |
 | `src/ardent/subagent.ts` | The `spawn_agent` tool: role selection, depth guard, abort forwarding, runner interface |
 | `src/ardent/subagent-runtime.ts` | Builds the nested in-process subagent `AgentSession` |
 | `src/ardent/roles.ts` | The role table: each role's brief AND its tool subset (pure, SDK-free) |
@@ -544,6 +547,80 @@ the transcript as a boxless warning strip (`⟳ authorization reminder`) — the
 renderer reports that a nudge happened and that the action gate is unchanged, and
 deliberately does not echo the instruction that was sent to the model.
 
+## Engagement ownership, journal and artifacts (plan slice P2)
+
+Citations only mean something if something *owns* them. `src/ardent/application.ts`
+makes the engagement a durable object; `src/ardent/io.ts` gains the three
+primitives it is stored with.
+
+**Commands, not mutations.** Every change goes through a command on
+`EngagementStore` — `createEngagement`, `bindSession`, `releaseSession`,
+`transition` — and returns a discriminated result:
+
+```ts
+{ ok: true, value, revision } | { ok: false, code, message }
+```
+
+`code` comes from the plan's contract: `validation`, `not_found`,
+`revision_conflict`, `storage_unavailable`, `corrupt_store`,
+`unsupported_schema`, `incomplete_tail`, `locked`, … Callers branch on the
+code; nothing parses prose.
+
+Three rules are what make the journal worth having:
+
+- **validated → written → projected, in that order.** `#commit` checks the
+  batch first (known event types, references that exist, exactly one engagement
+  per command), then appends *and fsyncs* it, and only then moves the
+  in-memory projection. A full disk therefore produces `storage_unavailable`
+  with an unchanged projection — never a "saved" engagement that was not saved.
+- **one command = one JSONL record.** Replay applies a batch whole or not at
+  all, and the engagements in memory are a projection: `close()` followed by
+  `open()` reproduces them exactly, including revisions and released bindings
+  (`test/ardent-application.test.ts`).
+- **idempotent by `commandId`.** Repeating an id returns the original result
+  and commits nothing; reusing an id for a *different* payload is `validation`.
+  A retry after a timeout cannot quietly become two engagements.
+
+Ownership specifics:
+
+- An engagement is created `draft` with objective, authorization reference and
+  scope. Moving it to `active` is a separate command, and resuming from
+  `paused` must hand back the recorded authorization reference — supplying a
+  different one is refused, because a changed authorization is a new
+  engagement, not a resume.
+- A session is bound by **explicit id only**: there is no most-recent-engagement
+  to fall back to, and a session holds one engagement at a time (switching is
+  release + bind, both visible). Closing releases that engagement's bound
+  sessions *in the same batch* and keeps the bindings as history. Closed
+  engagements stay readable and accept nothing.
+- `expectedRevision` gives optimistic concurrency: a stale value is
+  `revision_conflict`, never a silent overwrite.
+
+**Storage primitives** (`src/ardent/io.ts`):
+
+| Primitive | Guarantee | Reports |
+|---|---|---|
+| `Journal` | append-only JSONL, one validated batch per line, written **and fsync'd** before its command is called successful | `storage_unavailable`, `corrupt_store`, `unsupported_schema`, `incomplete_tail` |
+| `JournalLock` | single writer, taken before any mutation. Never reclaimed by age — ownership (pid / host / since) is reported and `clear()` is a separate, explicitly-called operator action | `locked` |
+| `ArtifactStore` | content-addressed (sha256): temp file → fsync → rename, so bytes are complete before any event could point at them | `storage_unavailable` |
+
+Faults are detected and remembered, never auto-repaired. Mid-file damage or an
+unknown record schema blocks every command rather than skipping it; a file cut
+short mid-record blocks until `recoverTail()`, which returns the bytes it
+discarded so records are never silently truncated. A second process on the same
+journal is refused at `open()`, before it can mutate anything.
+
+Evidence writes are now under the same contract: `createJsonlEvidenceSink` no
+longer swallows errors, so a failed durable write sets
+`EvidenceStore.degraded` (with `persistenceError` saying why) instead of
+reporting success over a hole. The flag is deliberately sticky — a later
+successful write does not repair the record that went missing. Surfacing it in
+`/ardent` and the HUD is plan Phase 6's "durable-write status", not wired yet.
+
+**Not wired yet:** the extension still keeps config and evidence state in
+process. Plan slice P3 is what moves session binding and the evidence commands
+onto this application service while keeping the external tool names stable.
+
 ## Known Phase 1 limitations
 
 - **Parallel workers are not possible, and this is now measured rather than
@@ -559,7 +636,10 @@ deliberately does not echo the instruction that was sent to the model.
   remains unmeasured is how wide the pipelining window is in practice; the
   probe used a single long `sleep`.
 - Working memory and evidence are per-process; v1 does not yet reload a store
-  across sessions.
+  across sessions. Engagements themselves are durable now (journal + replay,
+  see "Engagement ownership" above), and a failed evidence write is at least
+  *visible* via `EvidenceStore.degraded` — but the evidence records still have
+  no rehydration path, so the flag reports a hole nothing can yet fill.
 
 ## Phase 2 (in progress): plan → execute → verify, then subagents
 
@@ -577,8 +657,10 @@ deliberately does not echo the instruction that was sent to the model.
 3. **Isolation:** move execution into a container (whole-process, per pi's own
    guidance) and enforce scope at the network layer, replacing the host gate as
    the primary boundary.
-4. **Long-term memory:** SQLite findings DB (query previous findings per target)
-   and artifact content-addressing.
+4. **Long-term memory:** SQLite findings DB (query previous findings per
+   target). Artifact content-addressing now exists as `ArtifactStore`
+   (sha256, temp → fsync → rename); what remains is routing evidence
+   artifacts through it and reloading them on restart.
 
 ## Porting
 

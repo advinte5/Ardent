@@ -208,3 +208,105 @@ export interface WorkingMemory {
 export function emptyWorkingMemory(): WorkingMemory {
   return { facts: [], todos: [], artifactIds: [] };
 }
+
+// ---------------------------------------------------------------------------
+// Engagement ownership (Phase 1 / P2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lifecycle of an engagement.
+ *
+ *   draft -> active -> paused -> active ... -> closed
+ *
+ * Resuming from `paused` requires the authorization recorded at creation to
+ * still be current (the application checks it), and a `closed` engagement stays
+ * readable forever — reopening one is a new run with new authorization, never a
+ * rewrite of history.
+ */
+export type EngagementLifecycle = "draft" | "active" | "paused" | "closed";
+
+/** Lifecycle transitions the application will accept. Everything else is refused. */
+const LIFECYCLE_TRANSITIONS: Readonly<Record<EngagementLifecycle, readonly EngagementLifecycle[]>> = {
+  draft: ["active", "closed"],
+  active: ["paused", "closed"],
+  paused: ["active", "closed"],
+  closed: [],
+};
+
+/** True when `from -> to` is an allowed engagement transition. */
+export function canTransition(from: EngagementLifecycle, to: EngagementLifecycle): boolean {
+  return LIFECYCLE_TRANSITIONS[from].includes(to);
+}
+
+/**
+ * A durable session↔engagement binding.
+ *
+ * Bindings are explicit records: a new session never inherits the previous
+ * engagement implicitly (there is no "most recent engagement" to fall back
+ * to), and a released binding stays in the journal as history rather than
+ * being deleted, because the session really did hold that engagement's
+ * evidence at the time.
+ */
+export interface SessionBinding {
+  sessionId: string;
+  engagementId: string;
+  boundAt: number;
+  releasedAt?: number;
+}
+
+/** Who owns an engagement: the durable identity findings are attributed to. */
+export interface Engagement {
+  id: string;
+  objective: string;
+  /** Authorization reference — what makes the work sanctioned. */
+  authorizationRef: string;
+  /** Approved scope at the time of creation. */
+  scope: Scope;
+  lifecycle: EngagementLifecycle;
+  /** Optimistic-concurrency counter; bumped by every committed command. */
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Command failure codes, following the engagement plan's command/error
+ * contract. Callers branch on these rather than parsing prose; the meanings
+ * must survive through tool details and UI.
+ *
+ * `locked` and `incomplete_tail` are operational (they describe the store, not
+ * the payload) and are included because a second writer and a half-written
+ * record both have to be reported honestly rather than swallowed.
+ */
+export type ErrorCode =
+  | "validation"
+  | "not_found"
+  | "foreign_reference"
+  | "revision_conflict"
+  | "scope_denied"
+  | "approval_required"
+  | "identity_unavailable"
+  | "budget_exhausted"
+  | "cancelled"
+  | "storage_unavailable"
+  | "corrupt_store"
+  | "unsupported_schema"
+  | "incomplete_tail"
+  | "locked"
+  | "transport_error"
+  | "provider_error";
+
+/** The discriminated result every application command returns. */
+export type CommandResult<R> =
+  | { ok: true; value: R; revision: number }
+  | { ok: false; code: ErrorCode; message: string };
+
+/** Build a typed command failure. */
+export function commandError<R = never>(code: ErrorCode, message: string): CommandResult<R> {
+  return { ok: false, code, message };
+}
+
+/** Build a typed command success carrying the committed revision. */
+export function commandOk<R>(value: R, revision: number): CommandResult<R> {
+  return { ok: true, value, revision };
+}

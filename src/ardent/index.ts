@@ -7,6 +7,7 @@ export * from "./memory";
 export * from "./evidence";
 export * from "./config";
 export * from "./prompt";
+export * from "./application";
 export * from "./io";
 export * from "./subagent";
 export * from "./subagent-runtime";

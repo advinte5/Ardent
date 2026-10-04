@@ -324,3 +324,44 @@ describe("verification cannot promote itself", () => {
     }
   });
 });
+
+describe("EvidenceStore durability", () => {
+  test("a failed durable write degrades the store instead of passing silently", () => {
+    const persisted: EvidenceRecord[] = [];
+    let deviceFull = true;
+    const s = new EvidenceStore({
+      persist: (record) => {
+        if (deviceFull) throw new Error("ENOSPC: no space left on device");
+        persisted.push(record);
+      },
+      now: () => 1_000,
+    });
+
+    expect(s.degraded).toBe(false);
+    expect(s.persistenceError).toBeUndefined();
+
+    // The engagement keeps running: a lost audit line must not abort it...
+    const observation = s.addObservation({ source: "nmap", summary: "port 22 open", target: "10.0.0.5" });
+    expect(s.observations).toHaveLength(1);
+    expect(observation.id).toBe("obs-1");
+
+    // ...but the store now admits that this record is not on the device.
+    expect(s.degraded).toBe(true);
+    expect(s.persistenceError).toContain("ENOSPC");
+    expect(persisted).toHaveLength(0);
+
+    // A later success does not erase the hole: the missing record is still
+    // missing, and reporting "all clear" would be the lie this flag prevents.
+    deviceFull = false;
+    s.addObservation({ source: "nmap", summary: "port 80 open", target: "10.0.0.5" });
+    expect(persisted).toHaveLength(1);
+    expect(s.degraded).toBe(true);
+  });
+
+  test("a store with no sink is not degraded by construction", () => {
+    const s = new EvidenceStore({ now: () => 1_000 });
+    s.addObservation({ source: "nmap", summary: "port 22 open", target: "10.0.0.5" });
+    expect(s.degraded).toBe(false);
+    expect(s.persistenceError).toBeUndefined();
+  });
+});

@@ -82,10 +82,34 @@ export class EvidenceStore {
   private readonly persist?: EvidencePersist;
   private readonly now: () => number;
   private seq = 0;
+  /**
+   * Sticky: set when a durable write threw, cleared only by construction.
+   *
+   * A later success does NOT clear it — the record that failed is still
+   * missing from the file, and reporting "all clear" because the *next* write
+   * landed would be exactly the lie this flag exists to prevent. Once a write
+   * has failed, the store is degraded until it is rebuilt from memory or
+   * reopened against a working device.
+   */
+  private persistError: string | undefined;
 
   constructor(opts: EvidenceStoreOptions = {}) {
     this.persist = opts.persist;
     this.now = opts.now ?? Date.now;
+  }
+
+  /**
+   * True when the in-memory record and the durable record have diverged.
+   * Anything reporting evidence counts should say so: "3 verified" is only
+   * true of what is in memory until the journal is known to hold it too.
+   */
+  get degraded(): boolean {
+    return this.persistError !== undefined;
+  }
+
+  /** Why the store is degraded, for surfacing to the operator. */
+  get persistenceError(): string | undefined {
+    return this.persistError;
   }
 
   private nextId(prefix: string): string {
@@ -97,8 +121,10 @@ export class EvidenceStore {
     if (!this.persist) return;
     try {
       this.persist(record);
-    } catch {
-      // best-effort: a persistence failure must not abort the engagement
+    } catch (err) {
+      // The engagement keeps running (a lost audit line must not abort it),
+      // but the store is now telling the truth about having lost it.
+      this.persistError = err instanceof Error ? err.message : String(err);
     }
   }
 
