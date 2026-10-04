@@ -32,7 +32,10 @@ function severityIndex(severity: Severity): number {
 
 /** One finding line, worst-first fields. */
 export function findingLine(f: Finding): string {
-    const mark = f.status === "verified" ? "✓" : f.status === "refuted" ? "✗" : "◆";
+    // Inconclusive gets its own mark: it has been tested and produced no
+    // verdict, which is a different report entry from an untested candidate.
+    const mark =
+        f.status === "verified" ? "✓" : f.status === "refuted" ? "✗" : f.status === "inconclusive" ? "?" : "◆";
     const cites = f.observationIds.length + f.artifactIds.length;
     return `  ${mark} ${f.id}  ${f.severity.toUpperCase().padEnd(8)} ${f.title} — ${f.target}  (${cites} citation${cites === 1 ? "" : "s"})`;
 }
@@ -43,8 +46,10 @@ export function pathLine(path: AttackPath): string {
 
 function countsLine(input: DashboardInput): string {
     const verified = input.findings.filter((f) => f.status === "verified").length;
-    const candidates = input.findings.length - verified;
-    return `  ${input.observations} observation(s) · ${verified} verified · ${candidates} candidate(s) · ${input.artifacts.length} artifact(s) · ${input.paths.length} path(s)`;
+    const inconclusive = input.findings.filter((f) => f.status === "inconclusive").length;
+    const candidates = input.findings.length - verified - inconclusive;
+    const tail = inconclusive > 0 ? ` · ${inconclusive} inconclusive` : "";
+    return `  ${input.observations} observation(s) · ${verified} verified · ${candidates} candidate(s)${tail} · ${input.artifacts.length} artifact(s) · ${input.paths.length} path(s)`;
 }
 
 function findingSection(input: DashboardInput): string[] {

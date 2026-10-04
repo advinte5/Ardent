@@ -147,10 +147,11 @@ export const AGENT_ROLES: Readonly<Record<ArdentRole, AgentRoleSpec>> = {
   },
   verifier: {
     brief:
-      "You are the VERIFIER. For each candidate finding, try to reproduce it. Discard anything you cannot demonstrate, and record the verification result and your confidence.",
+      "You are the VERIFIER. For each candidate finding, try to reproduce it. Discard anything you cannot demonstrate. Record the verification with its method and confidence, and cite in proof_observation_ids/proof_artifact_ids the records that carry the result — without them the attempt is logged as unvalidated and the finding does not change. If the test ran but could not discriminate, set inconclusive; that is not a refutation.",
     // The screenshot is here because reproducing a rendering bug (XSS that
     // paints a marker, a reflected payload) is what a verifier does; it still
-    // cannot promote a finding on a screenshot alone.
+    // cannot promote a finding on a screenshot alone — the store rejects
+    // screenshot-only proof outright.
     tools: [
       ...READ_TOOLS,
       ...EXEC_TOOLS,

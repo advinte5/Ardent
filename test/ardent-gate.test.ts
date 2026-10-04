@@ -45,6 +45,46 @@ describe("assessAction — scope egress", () => {
   });
 });
 
+describe("assessAction — fails closed", () => {
+  test("a scope that cannot be read blocks instead of allowing", () => {
+    const broken = { entries: null } as never;
+    const a = assessAction({ toolName: "bash", input: { command: "nmap 10.0.0.5" }, scope: broken, cwd });
+    expect(a.action).toBe("block");
+    expect(a.reason).toContain("policy evaluation failed");
+  });
+
+  test("hostile argument shapes block rather than throwing", () => {
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("boom");
+        },
+      },
+    );
+    const a = assessAction({
+      toolName: "bash",
+      input: hostile as Record<string, unknown>,
+      scope,
+      cwd,
+    });
+    expect(a.action).toBe("block");
+    expect(a.reason).toContain("boom");
+  });
+
+  test("an unassessable call never claims a scope verdict it did not reach", () => {
+    const a = assessAction({
+      toolName: "bash",
+      input: { get command(): string { throw new Error("unreadable"); } },
+      scope,
+      cwd,
+    });
+    expect(a.action).toBe("block");
+    expect(a.reason).not.toContain("outside engagement scope");
+    expect(a.targets).toEqual([]);
+  });
+});
+
 describe("assessAction — sensitive actions", () => {
   test("confirms privilege escalation and credential access", () => {
     expect(gate("bash", { command: "sudo id" }).action).toBe("confirm");

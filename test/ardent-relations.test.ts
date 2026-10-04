@@ -185,7 +185,13 @@ describe("attackPaths", () => {
     const { store, ids } = storeWith(2);
     store.addRelation({ from: ids[0]!, to: ids[1]!, kind: "enables" });
     expect(store.attackPaths()[0]!.verifiedCount).toBe(0);
-    store.addVerification({ findingId: ids[1]!, passed: true, method: "repro", confidence: 0.9 });
+    store.addVerification({
+      findingId: ids[1]!,
+      passed: true,
+      method: "repro",
+      confidence: 0.9,
+      proof: { observationIds: ["obs-1"] },
+    });
     expect(store.attackPaths()[0]!.verifiedCount).toBe(1);
   });
 
@@ -222,17 +228,31 @@ describe("renderFindings", () => {
     const { store, ids } = storeWith(3);
     store.addRelation({ from: ids[0]!, to: ids[1]!, kind: "enables" });
     store.addRelation({ from: ids[1]!, to: ids[2]!, kind: "enables" });
-    store.addVerification({ findingId: ids[1]!, passed: true, method: "repro", confidence: 0.9 });
+    store.addVerification({
+      findingId: ids[1]!,
+      passed: true,
+      method: "repro",
+      confidence: 0.9,
+      proof: { observationIds: ["obs-1"] },
+    });
 
     const report = store.renderFindings();
     expect(report).toContain("1 attack path(s):");
     expect(report).toContain(`${ids[0]} → ${ids[1]} → ${ids[2]}`);
     expect(report).toContain("peak medium, 1/3 verified");
+    // A chain with unverified links is labelled a candidate, never a proven route.
+    expect(report).toContain("candidate");
   });
 
   test("says nothing about paths when there are none", () => {
     const { store, ids } = storeWith(2);
-    store.addVerification({ findingId: ids[0]!, passed: true, method: "repro", confidence: 0.9 });
+    store.addVerification({
+      findingId: ids[0]!,
+      passed: true,
+      method: "repro",
+      confidence: 0.9,
+      proof: { observationIds: ["obs-1"] },
+    });
     expect(store.renderFindings()).not.toContain("attack path");
   });
 });

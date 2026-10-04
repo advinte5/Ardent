@@ -292,6 +292,100 @@ describe("free-pi-ardent extension", () => {
     expect(result.content[0]!.text).toContain("Rejected");
   });
 
+  test("fails closed when the gate itself cannot be evaluated", async () => {
+    const { handlers } = build(() => engagedConfig);
+    await handlers.get("session_start")![0]!({}, makeCtx());
+    const result = (await handlers.get("tool_call")![0]!(
+      {
+        get toolName(): string {
+          throw new Error("unstable event");
+        },
+        input: {},
+      },
+      makeCtx(),
+    )) as { block?: boolean; reason?: string } | undefined;
+    // Previously this path returned undefined — i.e. it allowed the call it
+    // had failed to assess.
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("policy evaluation failed");
+    expect(result?.reason).toContain("unstable event");
+  });
+
+  test("ardent_finding refuses a citation-less claim with a typed code", async () => {
+    const { handlers, tools } = build(() => engagedConfig);
+    await handlers.get("session_start")![0]!({}, makeCtx());
+    const finding = tools.find((t) => t.name === "ardent_finding")!;
+    const result = (await finding.execute(
+      "call-citation",
+      { title: "SQLi", severity: "high", target: "10.0.0.5", description: "auth bypass", observation_ids: [] },
+      undefined,
+      undefined,
+      makeCtx(),
+    )) as { content: Array<{ text: string }>; details: { ok: boolean; code?: string } };
+    expect(result.details.ok).toBe(false);
+    expect(result.details.code).toBe("missing_citation");
+    expect(result.content[0]!.text).toContain("Rejected");
+  });
+
+  test("ardent_verify records an unproofed claim as unvalidated, then promotes on proof", async () => {
+    const { handlers, tools } = build(() => engagedConfig);
+    await handlers.get("session_start")![0]!({}, makeCtx());
+    const note = tools.find((t) => t.name === "ardent_note")!;
+    const observed = (await note.execute(
+      "call-note",
+      { summary: "500 on /admin", target: "10.0.0.5" },
+      undefined,
+      undefined,
+      makeCtx(),
+    )) as { details: { observation_id: string } };
+    const finding = tools.find((t) => t.name === "ardent_finding")!;
+    const created = (await finding.execute(
+      "call-finding",
+      {
+        title: "Error disclosure",
+        severity: "low",
+        target: "10.0.0.5",
+        description: "stack trace leaked",
+        observation_ids: [observed.details.observation_id],
+      },
+      undefined,
+      undefined,
+      makeCtx(),
+    )) as { details: { finding_id: string } };
+    const verify = tools.find((t) => t.name === "ardent_verify")!;
+
+    const claimed = (await verify.execute(
+      "call-verify-unproven",
+      { finding_id: created.details.finding_id, passed: true, method: "reproduced" },
+      undefined,
+      undefined,
+      makeCtx(),
+    )) as {
+      content: Array<{ text: string }>;
+      details: { outcome?: string; promoted?: boolean; status?: string };
+    };
+    expect(claimed.content[0]!.text).toContain("unvalidated");
+    expect(claimed.details.outcome).toBe("unvalidated");
+    expect(claimed.details.promoted).toBe(false);
+    expect(claimed.details.status).toBe("candidate");
+
+    const proven = (await verify.execute(
+      "call-verify-proven",
+      {
+        finding_id: created.details.finding_id,
+        passed: true,
+        method: "reproduced",
+        proof_observation_ids: [observed.details.observation_id],
+      },
+      undefined,
+      undefined,
+      makeCtx(),
+    )) as { details: { outcome?: string; promoted?: boolean; status?: string } };
+    expect(proven.details.outcome).toBe("supported");
+    expect(proven.details.promoted).toBe(true);
+    expect(proven.details.status).toBe("verified");
+  });
+
   test("announces nothing at session start — the HUD strip is the only scope surface", async () => {
     // The startup engagement splash was removed: it duplicated the persistent
     // HUD strip and made every startup noisy. session_start must stay silent.

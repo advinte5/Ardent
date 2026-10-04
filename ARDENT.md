@@ -56,9 +56,49 @@ gate is the boundary:
 - With a scope set, `tool_call` blocks destructive commands and out-of-scope
   egress outright, and requires interactive confirmation for privilege
   escalation, credential access, and writes outside the workspace. With no UI to
-  confirm, those are blocked, not allowed.
-- Findings must cite existing observation/artifact ids; verification is recorded
-  separately and only verified findings appear in `/findings`.
+  confirm, those are blocked, not allowed. **The gate fails closed**: if the
+  assessment cannot be computed at all — an unreadable scope, a hostile argument
+  shape — the call is blocked with `policy evaluation failed` rather than waved
+  through. A failed assessment is not permission, and the reason says what
+  actually happened instead of inventing a scope verdict.
+- Findings must cite existing observation/artifact ids **and at least one of
+  them**: an empty citation list is refused as `missing_citation`, a
+  never-issued id as `foreign_reference`. Verification is recorded separately
+  and **only promotes a finding when the attempt cites the proof carrying its
+  result** — `passed: true` on its own is stored as an `unvalidated` attempt
+  and leaves the finding a candidate. Only verified findings appear in
+  `/findings`.
+
+### Verification promotes only on proof
+
+`ardent_verify` takes `proof_observation_ids` / `proof_artifact_ids` alongside
+`passed` and `method`. The store derives the outcome **from the proof, never
+from `passed`**:
+
+| Proof cited | Claim | Recorded outcome | Finding status |
+| --- | --- | --- | --- |
+| none | `passed: true` | `unvalidated` | unchanged (still a candidate) |
+| yes | `passed: true` | `supported` | `verified` |
+| yes | `passed: false` | `refuted` | `refuted` |
+| yes | `inconclusive: true` | `inconclusive` | `inconclusive` |
+| screenshot-only | any | refused (`validation`) | unchanged |
+
+This is what stops a worker promoting its own candidate by asserting a boolean.
+The unvalidated attempt is still persisted — it happened, and the audit trail
+should show it — but it reaches neither `/findings` nor the `Verify …` todo,
+which stays open so a live lead is not buried behind a bare assertion.
+`inconclusive` is its own status throughout: a test that could not discriminate
+is not a refutation, and the report says so.
+
+Screenshot-only proof is refused because a capture shows what rendered, not
+what executed (see *Screenshots are artifacts, not proof*): the deterministic
+signal has to be recorded as an observation, or as a non-image artifact, beside
+the image.
+
+Every refusal carries a typed code — `validation`, `missing_citation`,
+`foreign_reference`, `not_found` — that survives into the tool result's
+`details` and the TUI row, so neither the model nor the operator has to parse
+prose to learn what was wrong with the claim.
 
 **Data-handling caveat:** free-pi's consent covers training on sessions and may
 share/sell trace data. Running a real engagement through it risks target data
@@ -131,8 +171,9 @@ characters anywhere. Structure comes from indentation, colour and spacing:
   truncation points differed because the prefixes differ, which read as broken.
   A result's job is the outcome (`recorded obs-1`), not the input.
 - One glyph per concept, reused everywhere: `◦` observation, `◆` finding,
-  `✓` pass / `✗` fail-or-refuted, `↻` spawn, `⊘` aborted, `◎` scope, `●`/`○`
-  live/idle.
+  `✓` pass / `✗` fail-or-refuted (the verdict word next to it distinguishes
+  `refuted` from `unvalidated`), `?` inconclusive on the dashboard, `↻` spawn,
+  `⊘` aborted, `◎` scope, `●`/`○` live/idle.
 
 Rows are fitted by **visible width before styling**, so an ANSI sequence is
 never split. `fitSegments` drops whole trailing segments rather than cutting a
@@ -195,7 +236,9 @@ never walked.
 its **peak severity** (the most urgent link, not the first) and how many links
 are actually verified. A finding with no incoming `enables` edge is a root; a
 node with two parents appears in both routes, because both genuinely get there.
-`/findings` reports chains separately from the flat list, and the HUD strip
+`/findings` reports chains separately from the flat list, and each chain is
+labelled **`demonstrated`** when every link on it is verified and **`candidate`**
+otherwise — an unproven route never reads as a proven one. The HUD strip
 carries a `⇢ N paths` count once any exist.
 
 The engagement brief tells the model to chain as it goes, because a chain found
@@ -221,7 +264,10 @@ So the capture is recorded as an artifact and **never as a verification**. The
 deterministic signal (DOM state, console output, a network call, the payload
 string in the returned HTML) is the observation; the image is attached to it. The
 tool's own guidelines say this in the model's words, and `ardent_verify` still
-requires a `method` describing how it was actually reproduced.
+requires a `method` describing how it was actually reproduced **plus proof a
+screenshot cannot supply**: proof consisting only of captures is refused with
+`validation`, because the deterministic signal (DOM state, console output,
+request/response bytes) is what a verdict stands on.
 
 Three consequences worth knowing:
 

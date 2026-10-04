@@ -4,7 +4,7 @@
 // extension calls `assessAction()` on every tool call and blocks or confirms
 // anything dangerous or out of scope. Pure and deterministic so it is fully
 // unit-tested. Deliberately conservative — unknown egress is not treated as
-// safe.
+// safe, and neither is an assessment we failed to compute.
 //
 // The report's "harmful omission" list is the rule set: destructive commands,
 // out-of-scope targets, credential access, and writes outside the workspace.
@@ -82,8 +82,27 @@ function isOutsideCwd(targetPath: string, cwd: string): boolean {
  * Classify one tool call. When no scope is configured the gate is inert
  * (returns allow) so ordinary free-pi coding use is unaffected; the Ardent
  * extension simply is not engaged. Once a scope exists, the gate is active.
+ *
+ * This wrapper exists so the gate **fails closed**: if policy evaluation
+ * itself blows up — a malformed scope, a hostile argument shape — there is no
+ * assessment, and no assessment is not permission. The returned reason says
+ * the evaluation failed rather than inventing a scope violation, so the audit
+ * trail stays truthful about what actually happened.
  */
 export function assessAction(input: GateInput): ActionAssessment {
+  try {
+    return evaluateAction(input);
+  } catch (err) {
+    return {
+      action: "block",
+      reason: `policy evaluation failed: ${err instanceof Error ? err.message : String(err)}`,
+      targets: [],
+    };
+  }
+}
+
+/** The rules themselves. Throwing is safe: `assessAction` turns it into a block. */
+function evaluateAction(input: GateInput): ActionAssessment {
   const { toolName, scope } = input;
   if (!isEngaged(scope)) {
     return { action: "allow", reason: "no engagement scope configured", targets: [] };

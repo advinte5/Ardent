@@ -18,7 +18,7 @@ import { Type } from "typebox";
 import { getArdentConfigPath, getArdentDir } from "../paths";
 import { CLI_VERSION } from "../version";
 import type { ArdentConfig } from "./config";
-import { EvidenceStore, type EvidencePersist } from "./evidence";
+import { EvidenceStore, type EvidenceErrorCode, type EvidencePersist } from "./evidence";
 import { addFact, addTodo, completeTodo, renderWorkingMemory, trackArtifact } from "./memory";
 import { assessAction, describeAssessment } from "./gate";
 import { engagementContext, type ArdentRole } from "./prompt";
@@ -29,7 +29,7 @@ import {
   lastAssistantText,
   recoveryMessage,
 } from "./refusal";
-import type { Confidence, RelationKind, Severity, WorkingMemory } from "./types";
+import type { Confidence, FindingStatus, RelationKind, Severity, VerificationOutcome, WorkingMemory } from "./types";
 import { emptyWorkingMemory } from "./types";
 import {
   ARDENT_SCREENSHOT_TOOL,
@@ -216,7 +216,12 @@ const FINDING_PARAMS = Type.Object({
   ),
   target: Type.String({ description: "Affected host/IP." }),
   description: Type.String({ description: "What the issue is and its impact." }),
-  observation_ids: Type.Array(Type.String(), { description: "Observation ids (obs-N) that support it." }),
+  observation_ids: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Observation ids (obs-N) that support it. At least one observation or artifact id is required — an empty list is rejected as a finding with no evidence.",
+    }),
+  ),
   artifact_ids: Type.Optional(Type.Array(Type.String(), { description: "Artifact ids (art-N) that support it." })),
   confidence: Type.Optional(Type.Number({ description: "0..1 confidence.", default: 0.5 })),
 });
@@ -225,6 +230,23 @@ const VERIFY_PARAMS = Type.Object({
   finding_id: Type.String({ description: "Finding id (find-N) to verify." }),
   passed: Type.Boolean({ description: "True if reproduced/confirmed." }),
   method: Type.String({ description: "How it was verified." }),
+  proof_observation_ids: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Observation ids (obs-N) carrying this result — the record of the test that ran. Without at least one proof id (or proof_artifact_ids) the attempt is recorded as unvalidated and the finding is NOT promoted.",
+    }),
+  ),
+  proof_artifact_ids: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Artifact ids (art-N) carrying this result, e.g. the captured exchange or screenshot.",
+    }),
+  ),
+  inconclusive: Type.Optional(
+    Type.Boolean({
+      description:
+        "Set when the test actually ran but could not discriminate either way. Recorded as inconclusive — explicitly not a refutation.",
+    }),
+  ),
   confidence: Type.Optional(Type.Number({ description: "0..1 confidence.", default: 0.8 })),
   notes: Type.Optional(Type.String({ description: "Optional details." })),
 });
@@ -277,6 +299,10 @@ interface FindingToolDetails {
   title?: string;
   target?: string;
   observation_count?: number;
+  artifact_count?: number;
+  /** Typed refusal (validation / foreign_reference / missing_citation / …). */
+  code?: EvidenceErrorCode;
+  error?: string;
 }
 
 interface VerifyToolDetails {
@@ -285,6 +311,14 @@ interface VerifyToolDetails {
   passed?: boolean;
   finding_id?: string;
   method?: string;
+  /** What the attempt established — the verdict the store actually recorded. */
+  outcome?: VerificationOutcome;
+  /** True only when this attempt moved the finding to verified. */
+  promoted?: boolean;
+  /** The finding's status after the attempt. */
+  status?: FindingStatus;
+  code?: EvidenceErrorCode;
+  error?: string;
 }
 
 interface ScreenshotToolDetails {
@@ -678,18 +712,24 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
       });
 
       // ---- Action gate -----------------------------------------------------
+      // Fail closed: everything needed to reach a verdict (engagement check,
+      // argument extraction, the rules) is inside the try, because an
+      // assessment we could not compute is not permission to run the call.
+      // The reason states that evaluation failed rather than dressing it up
+      // as an out-of-scope block.
       pi.on("tool_call", async (event, ctx: ExtensionContext) => {
-        if (!engaged()) return undefined;
         let assessment;
         try {
+          if (!engaged()) return undefined;
           assessment = assessAction({
             toolName: event.toolName,
             input: (event.input ?? {}) as Record<string, unknown>,
             scope: state.config!.scope,
             cwd: ctx.cwd,
           });
-        } catch {
-          return undefined;
+        } catch (err) {
+          const why = err instanceof Error ? err.message : String(err);
+          return { block: true, reason: `Ardent scope guard: policy evaluation failed (${why})` };
         }
         audit(describeAssessment(event.toolName, assessment));
 
@@ -824,7 +864,8 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
           "Record a candidate security finding linked to existing observation/artifact ids. A finding with no evidence is rejected.",
         promptSnippet: "Record a candidate Ardent finding with supporting evidence",
         promptGuidelines: [
-          "A finding must cite at least one observation id; call ardent_note first.",
+          "A finding must cite at least one observation or artifact id — an empty citation list is refused as missing_citation. Call ardent_note (or capture an artifact) first.",
+          "Cited ids must exist in this engagement; a made-up id is refused as foreign_reference.",
           "Use ardent_verify to confirm a finding before reporting it.",
         ],
         parameters: FINDING_PARAMS,
@@ -849,7 +890,13 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
             ...(params.artifact_ids === undefined ? {} : { artifactIds: params.artifact_ids }),
           });
           if (!result.ok) {
-            return { content: [{ type: "text" as const, text: `Rejected: ${result.error}` }], details: { ok: false } };
+            // The code survives into tool details and the TUI row, so neither
+            // the model nor the operator has to parse the sentence to learn
+            // what was wrong with the claim.
+            return {
+              content: [{ type: "text" as const, text: `Rejected: ${result.error}` }],
+              details: { ok: false, code: result.code, error: result.error },
+            };
           }
           addTodo(state.memory, `Verify ${result.finding.id}: ${params.title}`, params.severity === "critical" ? 10 : 5);
           pi.appendEntry("ardent-memory", state.memory);
@@ -862,7 +909,8 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
               severity: params.severity as Severity,
               title: params.title,
               target: params.target,
-              observation_count: params.observation_ids.length,
+              observation_count: params.observation_ids?.length ?? 0,
+              artifact_count: params.artifact_ids?.length ?? 0,
             },
           };
         },
@@ -872,8 +920,12 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
         name: ARDENT_VERIFY_TOOL,
         label: "Record verification",
         description:
-          "Record the outcome of testing a candidate finding. Only verified findings appear in the report.",
+          "Record the outcome of testing a candidate finding, citing the evidence that carries the result. The finding only changes status when the attempt cites proof: a claim with no proof ids is recorded as unvalidated and does not promote. Only verified findings appear in the report.",
         promptSnippet: "Record the verification result for an Ardent finding",
+        promptGuidelines: [
+          "Cite the ids that carry the result in proof_observation_ids / proof_artifact_ids — that is what promotes the finding. `passed: true` alone records an unvalidated claim and leaves it a candidate.",
+          "Use inconclusive: true when the test ran but could not discriminate; that is explicitly not a refutation.",
+        ],
         parameters: VERIFY_PARAMS,
         renderCall(args, theme) {
           return componentFromLines((width) => verifyCallLines(theme, args, width));
@@ -892,25 +944,42 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
             method: params.method,
             confidence: (params.confidence ?? 0.8) as Confidence,
             ...(params.notes === undefined ? {} : { notes: params.notes }),
+            proof: {
+              ...(params.proof_observation_ids === undefined ? {} : { observationIds: params.proof_observation_ids }),
+              ...(params.proof_artifact_ids === undefined ? {} : { artifactIds: params.proof_artifact_ids }),
+            },
+            ...(params.inconclusive === undefined ? {} : { inconclusive: params.inconclusive }),
           });
           if (!result.ok) {
-            return { content: [{ type: "text" as const, text: `Rejected: ${result.error}` }], details: { ok: false } };
+            return {
+              content: [{ type: "text" as const, text: `Rejected: ${result.error}` }],
+              details: { ok: false, code: result.code, error: result.error },
+            };
           }
-          const finding = state.evidence.findings.find((f) => f.id === params.finding_id);
-          if (finding) completeTodo(state.memory, `Verify ${finding.id}: ${finding.title}`);
+          const finding = result.finding;
+          // The "Verify find-N" todo is only finished once the finding reached
+          // a verdict. An unvalidated or inconclusive attempt leaves the work
+          // open: closing it would bury a live lead behind a bare claim.
+          if (finding.status === "verified" || finding.status === "refuted") {
+            completeTodo(state.memory, `Verify ${finding.id}: ${finding.title}`);
+          }
           pi.appendEntry("ardent-memory", state.memory);
           refreshHud();
+          const outcome = result.verification.outcome;
+          const verdict = outcome === "supported" ? "verified" : outcome;
+          const text =
+            outcome === "unvalidated"
+              ? `${result.verification.id} recorded: unvalidated — no proof cited, so ${finding.id} remains ${finding.status}. Cite proof_observation_ids/proof_artifact_ids that carry the result to promote it.`
+              : `${result.verification.id}: ${verdict} (${params.method}) → ${finding.id} is now ${finding.status}.`;
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: `${result.verification.id}: ${params.passed ? "verified" : "refuted"} (${params.method}).`,
-              },
-            ],
+            content: [{ type: "text" as const, text }],
             details: {
               ok: true,
               verification_id: result.verification.id,
               passed: params.passed,
+              outcome,
+              promoted: result.promoted,
+              status: finding.status,
               finding_id: params.finding_id,
               method: params.method,
             },
@@ -1058,6 +1127,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
             producedBy: "ardent_screenshot",
             description: params.description,
             sha256,
+            kind: "screenshot",
             target: params.target ?? target.host,
           });
           trackArtifact(state.memory, artifact.id);

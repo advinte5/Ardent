@@ -10,8 +10,27 @@ export type Severity = "info" | "low" | "medium" | "high" | "critical";
 /** 0..1 confidence in a Finding or Verification result. */
 export type Confidence = number;
 
-/** Lifecycle of a Finding as the verifier works it. */
-export type FindingStatus = "candidate" | "verified" | "refuted";
+/**
+ * Lifecycle of a Finding as the verifier works it.
+ *
+ * `inconclusive` is deliberately its own status rather than a synonym for
+ * either neighbour: a test that could not discriminate is not a test that
+ * failed, and reporting it as `refuted` would bury a live lead behind a
+ * negative-sounding label. `candidate` means "not yet tested"; `inconclusive`
+ * means "tested, no verdict".
+ */
+export type FindingStatus = "candidate" | "verified" | "refuted" | "inconclusive";
+
+/**
+ * What one verification actually established.
+ *
+ * `unvalidated` carries the load here: the caller claimed a result but cited
+ * no evidence, so nothing about the finding changed. It is not folded into
+ * `inconclusive` — "I could not prove it either way" and "I asserted it with
+ * nothing to back it" are different facts, and the report must not blur them
+ * into one reassuring-sounding state.
+ */
+export type VerificationOutcome = "supported" | "refuted" | "inconclusive" | "unvalidated";
 
 /** Lifecycle of a Hypothesis as evidence accumulates. */
 export type HypothesisStatus = "open" | "confirmed" | "refuted";
@@ -71,10 +90,20 @@ export interface Artifact {
   sha256?: string;
   /** Which tool/agent produced it. */
   producedBy: string;
+  /**
+   * What kind of record this is. A `screenshot` shows what rendered, not what
+   * executed, so it can corroborate a finding but can never carry a
+   * verification on its own (see EvidenceStore.addVerification). Absent means
+   * `file`.
+   */
+  kind?: ArtifactKind;
   /** Host/IP the artifact is about, when it has one. */
   target?: string;
   description: string;
 }
+
+/** Artifact classes that matter to what proof may carry. */
+export type ArtifactKind = "file" | "screenshot";
 
 /** The recorded outcome of testing a Finding. */
 export interface Verification {
@@ -85,6 +114,17 @@ export interface Verification {
   /** How it was verified (e.g. "reproduced PoC", "manual re-check"). */
   method: string;
   confidence: Confidence;
+  /**
+   * What the attempt established. Derived from the proof, never from
+   * `passed`: a claim of `passed: true` with no cited evidence records an
+   * attempt whose outcome is `unvalidated`.
+   */
+  outcome: VerificationOutcome;
+  /**
+   * Observation/artifact ids that carry the result. Empty means the claim was
+   * unsupported, which is exactly why it cannot promote the finding.
+   */
+  proofIds: string[];
   notes?: string;
 }
 

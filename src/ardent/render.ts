@@ -459,7 +459,8 @@ export interface FindingCallArgs {
     severity: string;
     target: string;
     description: string;
-    observation_ids: readonly string[];
+    /** Optional because the schema allows it: an omitted list is a citation-less finding the domain then refuses. */
+    observation_ids?: readonly string[];
 }
 
 export function findingCallLines(theme: ThemeLike, args: FindingCallArgs, width: number): string[] {
@@ -483,6 +484,9 @@ export interface FindingDetailsLike {
     title?: string;
     target?: string;
     observation_count?: number;
+    artifact_count?: number;
+    /** Typed refusal code from the store (validation / missing_citation / …). */
+    code?: string;
 }
 
 export function findingResultLines(
@@ -492,7 +496,12 @@ export function findingResultLines(
     width: number,
 ): string[] {
     if (details?.ok === false) {
-        return resultRow(theme, GLYPH.verifyFail, "error", [{ text: "rejected", bold: true }], [dim(rejectionReason(contentText))], width);
+        const reason = rejectionReason(contentText);
+        // The typed code is the part prose cannot carry: it is what the model
+        // and an operator branch on ("missing_citation" means call ardent_note
+        // first), and the row already says "rejected".
+        const meta: Span[] = [details.code ? dim(`${details.code} · ${reason}`) : dim(reason)];
+        return resultRow(theme, GLYPH.verifyFail, "error", [{ text: "rejected", bold: true }], meta, width);
     }
     const severity = details?.severity ?? "medium";
     const color = severityColor(severity);
@@ -506,8 +515,9 @@ export function findingResultLines(
     head.push({ text: severity.toUpperCase(), color });
     const meta: Span[] = [];
     if (details?.target) meta.push({ text: details.target, color: "accent" });
-    if (details?.observation_count !== undefined) {
-        meta.push(dim(`${meta.length > 0 ? " · " : ""}${plural(details.observation_count, "citation")}`));
+    if (details?.observation_count !== undefined || details?.artifact_count !== undefined) {
+        const citations = (details.observation_count ?? 0) + (details.artifact_count ?? 0);
+        meta.push(dim(`${meta.length > 0 ? " · " : ""}${plural(citations, "citation")}`));
     }
     return resultRow(theme, GLYPH.finding, color, head, meta.length > 0 ? meta : undefined, width);
 }
@@ -538,6 +548,10 @@ export interface VerifyDetailsLike {
     passed?: boolean;
     finding_id?: string;
     method?: string;
+    /** What the attempt actually established — see VerificationOutcome. */
+    outcome?: string;
+    /** Typed refusal code from the store. */
+    code?: string;
 }
 
 export function verifyResultLines(
@@ -547,17 +561,32 @@ export function verifyResultLines(
     width: number,
 ): string[] {
     if (details?.ok === false) {
-        return resultRow(theme, GLYPH.verifyFail, "error", [{ text: "rejected", bold: true }], [dim(rejectionReason(contentText))], width);
+        const reason = rejectionReason(contentText);
+        const meta: Span[] = [details.code ? dim(`${details.code} · ${reason}`) : dim(reason)];
+        return resultRow(theme, GLYPH.verifyFail, "error", [{ text: "rejected", bold: true }], meta, width);
     }
     const passed = details?.passed === true;
-    const tone = passed ? "success" : "warning";
-    const head: Span[] = [{ text: passed ? "verified" : "refuted", color: tone, bold: true }];
+    // State what the store recorded, not what was claimed. `passed: true`
+    // with no proof lands as `unvalidated`, and printing "verified" there
+    // would put a verdict on screen that the finding never received.
+    // Details without an outcome (older callers) fall back to `passed`.
+    const outcome = details?.outcome ?? (passed ? "supported" : "refuted");
+    const verdict =
+        outcome === "supported"
+            ? { text: "verified", color: "success", glyph: GLYPH.verifyPass }
+            : outcome === "refuted"
+                ? { text: "refuted", color: "warning", glyph: GLYPH.verifyFail }
+                : outcome === "inconclusive"
+                    ? { text: "inconclusive", color: "warning", glyph: GLYPH.verifyFail }
+                    : { text: "unvalidated", color: "warning", glyph: GLYPH.verifyFail };
+    const head: Span[] = [{ text: verdict.text, color: verdict.color, bold: true }];
     if (details?.verification_id) head.push({ text: ` ${details.verification_id}`, color: "accent" });
     // The method is NOT repeated — the call row shows it, and it can be long
     // free text. The result names the verification and the finding it rules on.
     const meta: Span[] = [];
     if (details?.finding_id) meta.push({ text: details.finding_id, color: "accent" });
-    return resultRow(theme, passed ? GLYPH.verifyPass : GLYPH.verifyFail, tone, head, meta.length > 0 ? meta : undefined, width);
+    if (outcome === "unvalidated") meta.push(dim("no proof cited — finding unchanged"));
+    return resultRow(theme, verdict.glyph, verdict.color, head, meta.length > 0 ? meta : undefined, width);
 }
 
 // ---- ardent_link ---------------------------------------------------------

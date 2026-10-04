@@ -230,6 +230,44 @@ describe("ardent_verify rows", () => {
     const joined = verifyResultLines(theme, { ok: false }, "Rejected: unknown finding find-9", 200).join("\n");
     expect(stripTags(joined)).toContain("unknown finding find-9");
   });
+
+  test("an unvalidated claim never renders as verified", () => {
+    const unvalidated = verifyResultLines(
+      theme,
+      { ok: true, verification_id: "ver-5", passed: true, finding_id: "find-3", outcome: "unvalidated" },
+      "",
+      200,
+    );
+    const text = stripTags(unvalidated.join("\n"));
+    expect(text).toContain("unvalidated");
+    expect(text).toContain("no proof cited");
+    expect(text).not.toContain("verified");
+    expect(unvalidated.join("\n")).toContain("<warning>");
+  });
+
+  test("inconclusive renders as its own verdict, not a refutation", () => {
+    const inconclusive = verifyResultLines(
+      theme,
+      { ok: true, verification_id: "ver-6", passed: false, finding_id: "find-3", outcome: "inconclusive" },
+      "",
+      200,
+    );
+    const text = stripTags(inconclusive.join("\n"));
+    expect(text).toContain("inconclusive");
+    expect(text).not.toContain("refuted");
+  });
+
+  test("a rejection row carries the typed code without repeating 'Rejected'", () => {
+    const rejected = findingResultLines(
+      theme,
+      { ok: false, code: "missing_citation" },
+      "Rejected: a finding must cite at least one observation or artifact id",
+      200,
+    ).join("\n");
+    const text = stripTags(rejected);
+    expect(text).toContain("missing_citation");
+    expect(text).not.toContain("Rejected:");
+  });
 });
 
 describe("spawn_agent rows", () => {

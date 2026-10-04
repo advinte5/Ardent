@@ -8,6 +8,7 @@
 // lost audit line must not abort the engagement — but it does surface it.
 import type {
   Artifact,
+  ArtifactKind,
   Confidence,
   Finding,
   FindingStatus,
@@ -18,6 +19,7 @@ import type {
   RelationKind,
   Severity,
   Verification,
+  VerificationOutcome,
 } from "./types";
 import { maxSeverity } from "./types";
 
@@ -33,6 +35,26 @@ export interface AttackPath {
 
 export interface EvidencePersist {
   (record: EvidenceRecord): void;
+}
+
+/**
+ * Why a domain command was refused, as a code the tool layer and the UI can
+ * branch on without parsing prose. The meanings mirror the command/error
+ * contract in the engagement plan: `validation` for malformed input,
+ * `foreign_reference` for an id this store never issued, `not_found` for a
+ * missing primary record, and `missing_citation` for a claim with no evidence
+ * to stand on.
+ */
+export type EvidenceErrorCode = "validation" | "foreign_reference" | "not_found" | "missing_citation";
+
+export interface EvidenceRejection {
+  ok: false;
+  code: EvidenceErrorCode;
+  error: string;
+}
+
+function reject(code: EvidenceErrorCode, error: string): EvidenceRejection {
+  return { ok: false, code, error };
 }
 
 export type EvidenceRecord =
@@ -119,6 +141,7 @@ export class EvidenceStore {
     producedBy: string;
     description: string;
     sha256?: string;
+    kind?: ArtifactKind;
     target?: string;
   }): Artifact {
     const value: Artifact = {
@@ -128,6 +151,7 @@ export class EvidenceStore {
       producedBy: input.producedBy,
       description: input.description,
       ...(input.sha256 === undefined ? {} : { sha256: input.sha256 }),
+      ...(input.kind === undefined ? {} : { kind: input.kind }),
       ...(input.target === undefined ? {} : { target: input.target }),
     };
     this.artifacts.push(value);
@@ -139,6 +163,11 @@ export class EvidenceStore {
    * Record a candidate finding. Every id supplied must already exist in the
    * store, otherwise the call fails — this is what stops an unsourced finding
    * from entering the report.
+   *
+   * Citations are strict: a finding must cite at least one observation or
+   * artifact. An empty citation list is the same claim with the support
+   * removed, so it is refused as `missing_citation` rather than accepted as a
+   * finding that happens to have no evidence yet.
    */
   addFinding(input: {
     title: string;
@@ -149,15 +178,26 @@ export class EvidenceStore {
     observationIds?: string[];
     artifactIds?: string[];
     status?: FindingStatus;
-  }): { ok: true; finding: Finding } | { ok: false; error: string } {
+  }): { ok: true; finding: Finding } | EvidenceRejection {
     const observationIds = input.observationIds ?? [];
     const artifactIds = input.artifactIds ?? [];
+    // Readable fields first: judging the citations of a title-less finding
+    // would be answering the wrong question.
+    if (input.title.trim() === "") return reject("validation", "title is required");
+    if (input.target.trim() === "") return reject("validation", "target is required");
+    if (input.description.trim() === "") return reject("validation", "description is required");
     const missing = [
       ...observationIds.filter((id) => !this.observations.some((o) => o.id === id)),
       ...artifactIds.filter((id) => !this.artifacts.some((a) => a.id === id)),
     ];
     if (missing.length > 0) {
-      return { ok: false, error: `unknown evidence id(s): ${missing.join(", ")}` };
+      return reject("foreign_reference", `unknown evidence id(s): ${missing.join(", ")}`);
+    }
+    if (observationIds.length === 0 && artifactIds.length === 0) {
+      return reject(
+        "missing_citation",
+        "a finding must cite at least one observation or artifact id; record one with ardent_note first",
+      );
     }
     const value: Finding = {
       id: this.nextId("find"),
@@ -177,16 +217,62 @@ export class EvidenceStore {
     return { ok: true, finding: value };
   }
 
-  /** Record a verification and apply its outcome to the linked finding. */
+  /**
+   * Record a verification and apply its outcome to the linked finding.
+   *
+   * The finding only moves when the attempt carries proof. `passed: true`
+   * plus a prose method is a model's say-so, not a result: it is recorded
+   * with outcome `unvalidated` and the finding stays exactly where it was,
+   * which is what stops a worker promoting its own candidate by asserting a
+   * boolean. A test that ran but could not discriminate is `inconclusive` —
+   * a real, reportable result that is specifically not `refuted`.
+   */
   addVerification(input: {
     findingId: string;
     passed: boolean;
     method: string;
     confidence: Confidence;
     notes?: string;
-  }): { ok: true; verification: Verification } | { ok: false; error: string } {
+    /** Observation/artifact ids that carry this attempt's result. */
+    proof?: { observationIds?: string[]; artifactIds?: string[] };
+    /** Set when the attempt ran but could not discriminate either way. */
+    inconclusive?: boolean;
+  }): { ok: true; verification: Verification; finding: Finding; promoted: boolean } | EvidenceRejection {
     const finding = this.findings.find((f) => f.id === input.findingId);
-    if (!finding) return { ok: false, error: `unknown finding id: ${input.findingId}` };
+    if (!finding) return reject("not_found", `unknown finding id: ${input.findingId}`);
+    const proofObservationIds = input.proof?.observationIds ?? [];
+    const proofArtifactIds = input.proof?.artifactIds ?? [];
+    const unknownProof = [
+      ...proofObservationIds.filter((id) => !this.observations.some((o) => o.id === id)),
+      ...proofArtifactIds.filter((id) => !this.artifacts.some((a) => a.id === id)),
+    ];
+    if (unknownProof.length > 0) {
+      return reject("foreign_reference", `unknown proof id(s): ${unknownProof.join(", ")}`);
+    }
+    const proofIds = [...proofObservationIds, ...proofArtifactIds];
+    // A screenshot shows what rendered, not what executed. Proof consisting
+    // only of captures therefore cannot carry a verdict: the deterministic
+    // signal (DOM state, console output, request/response bytes) has to be
+    // recorded as an observation, or as a non-image artifact, alongside the
+    // image.
+    const hasSubstantiveProof =
+      proofObservationIds.length > 0 ||
+      proofArtifactIds.some((id) => this.artifacts.find((a) => a.id === id)?.kind !== "screenshot");
+    if (proofIds.length > 0 && !hasSubstantiveProof) {
+      return reject(
+        "validation",
+        "a screenshot alone cannot carry a verification; cite the observation holding the deterministic signal (DOM state, console output, request/response) as proof",
+      );
+    }
+    // The outcome is derived from the proof, never from `passed` alone.
+    const outcome: VerificationOutcome =
+      proofIds.length === 0
+        ? "unvalidated"
+        : input.inconclusive
+          ? "inconclusive"
+          : input.passed
+            ? "supported"
+            : "refuted";
     const value: Verification = {
       id: this.nextId("ver"),
       ts: this.now(),
@@ -194,13 +280,23 @@ export class EvidenceStore {
       passed: input.passed,
       method: input.method,
       confidence: clamp01(input.confidence),
+      outcome,
+      proofIds,
       ...(input.notes === undefined ? {} : { notes: input.notes }),
     };
     this.verifications.push(value);
     finding.verificationIds.push(value.id);
-    finding.status = input.passed ? "verified" : "refuted";
+    if (outcome === "supported") finding.status = "verified";
+    else if (outcome === "refuted") finding.status = "refuted";
+    else if (outcome === "inconclusive") finding.status = "inconclusive";
+    // `unvalidated` deliberately leaves `finding.status` untouched.
     this.emit({ kind: "verification", value });
-    return { ok: true, verification: value };
+    return {
+      ok: true,
+      verification: value,
+      finding,
+      promoted: finding.status === "verified" && outcome === "supported",
+    };
   }
 
   /** Only verified findings belong in a report. */
@@ -305,7 +401,22 @@ export class EvidenceStore {
     const verified = this.verifiedFindings();
     if (this.findings.length === 0) return "No findings recorded.";
     if (verified.length === 0) {
-      return `${this.findings.length} candidate finding(s), none verified yet.`;
+      // Nothing is promoted, but the differences between the records still
+      // matter: a refuted lead and an inconclusive one are not both
+      // "candidates", and calling them that would erase the distinction the
+      // report exists to make.
+      const counts = [
+        this.findings.filter((f) => f.status === "refuted").length,
+        this.findings.filter((f) => f.status === "inconclusive").length,
+      ];
+      const [refuted, inconclusive] = [counts[0]!, counts[1]!];
+      const tail =
+        refuted + inconclusive === 0
+          ? ""
+          : ` (${[refuted > 0 ? `${refuted} refuted` : "", inconclusive > 0 ? `${inconclusive} inconclusive` : ""]
+              .filter((part) => part !== "")
+              .join(", ")})`;
+      return `${this.findings.length} finding(s) recorded, none verified yet${tail}.`;
     }
     const lines = [`${verified.length} verified finding(s):`];
     for (const f of verified) {
@@ -313,17 +424,30 @@ export class EvidenceStore {
       lines.push(`      evidence: ${[...f.observationIds, ...f.artifactIds, ...f.verificationIds].join(", ") || "none"}`);
     }
     const candidates = this.findings.length - verified.length;
-    if (candidates > 0) lines.push(`  (+${candidates} unverified candidate(s) not included)`);
+    if (candidates > 0) {
+      const inconclusive = this.findings.filter((f) => f.status === "inconclusive").length;
+      const untested = candidates - inconclusive;
+      const parts = [
+        untested > 0 ? `${untested} candidate(s)` : undefined,
+        inconclusive > 0 ? `${inconclusive} inconclusive` : undefined,
+      ]
+        .filter((part): part is string => part !== undefined)
+        .join(", ");
+      lines.push(`  (+${parts} — not verified, not included)`);
+    }
 
     // Attack paths are what a chained finding looks like once assembled. They
     // are reported separately from the flat list because the whole point is
-    // that the list is not the finding.
+    // that the list is not the finding — and a chain is only *demonstrated*
+    // once every link on it is verified. A chain with unverified links stays
+    // labelled a candidate path so it can never read as a proven route.
     const paths = this.attackPaths();
     if (paths.length > 0) {
       lines.push("", `${paths.length} attack path(s):`);
       for (const path of paths) {
+        const demonstrated = path.verifiedCount === path.findingIds.length;
         lines.push(
-          `  ${path.findingIds.join(" → ")}  (peak ${path.peakSeverity}, ${path.verifiedCount}/${path.findingIds.length} verified)`,
+          `  ${path.findingIds.join(" → ")}  (peak ${path.peakSeverity}, ${path.verifiedCount}/${path.findingIds.length} verified, ${demonstrated ? "demonstrated" : "candidate"})`,
         );
       }
     }
