@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createAdsExtension } from "@freepi/pi-ads";
 import { join, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { buildProviderConfig, MODEL_ID, PROVIDER_NAME, SAFE_TOOLS, type CatalogModel } from "./provider";
 import { createUsageToolExtension, USAGE_TOOL_NAME } from "./usage-tool";
 import { createBuyToolExtension, BUY_TOOL_NAME } from "./buy-tool";
@@ -21,6 +22,20 @@ import { createFreePiCommandsExtension } from "./commands";
 import { createHeaderExtension } from "./header";
 import { resolveFreePiScope } from "./provider-lock";
 import { patchResumeLine } from "./resume-line";
+import {
+  ARDENT_SUBAGENT_TOOL,
+  ARDENT_TOOL_NAMES,
+  createArdentChildExtension,
+  createArdentExtension,
+  type ArdentSessionState,
+} from "./ardent/extension";
+import { toolsForRole } from "./ardent/roles";
+import { DEFAULT_MAX_SUBAGENT_DEPTH, canSpawnFrom, type SubagentRunner } from "./ardent/subagent";
+import { createArdentSubagentRunner } from "./ardent/subagent-runtime";
+import { normalizeConcurrencyLimit } from "./ardent/concurrency";
+import { loadArdentConfigFromFile, createJsonlEvidenceSink } from "./ardent/io";
+import { getArdentConfigPath, getArdentEvidencePath } from "./paths";
+import { CLI_VERSION } from "./version";
 
 export interface LaunchOptions {
   baseUrl: string;
@@ -36,6 +51,13 @@ export interface LaunchOptions {
    * self-update fell back to notifying. Renders the header's update banner —
    * free-pi's replacement for pi's own (suppressed) `pi update` banner. */
   updateLatest?: string;
+  /**
+   * How many completions one lease may hold open, as advertised by
+   * `/client-version` (`max_concurrent_completions`). Absent or invalid means 1:
+   * subagents stay serialized and nothing about today's behavior changes. See
+   * `src/ardent/concurrency.ts`.
+   */
+  maxConcurrentCompletions?: number;
 }
 
 /** The models to register + scope the picker to: the server catalog when it
@@ -56,7 +78,20 @@ function catalogModelsFor(opts: LaunchOptions): CatalogModel[] {
 //      `--tools` flag, "only the listed tool names are enabled").
 //   2. Passed to the tool-guard extension, which blocks + reports anything
 //      outside this set that still somehow reaches a tool_call event.
-export const ALLOWED_TOOL_NAMES: readonly string[] = [...SAFE_TOOLS, USAGE_TOOL_NAME, BUY_TOOL_NAME, DOCS_TOOL_NAME];
+export const ALLOWED_TOOL_NAMES: readonly string[] = [
+  ...SAFE_TOOLS,
+  USAGE_TOOL_NAME,
+  BUY_TOOL_NAME,
+  DOCS_TOOL_NAME,
+  // Ardent (2026-10-02): the evidence-recording tools. Present in every build
+  // but only functional during an engagement (no scope → inert), so they must
+  // be in the allowlist even for plain coding use.
+  ...ARDENT_TOOL_NAMES,
+  // Ardent Phase 2: the subagent tool. It refuses outside an engagement and is
+  // `executionMode: "sequential"`, so it can never open a second concurrent
+  // completion — the guarantee test/no-subagents.test.ts still asserts.
+  ARDENT_SUBAGENT_TOOL,
+];
 
 export interface RuntimeBuildOptions {
   settingsManager: SettingsManager;
@@ -154,14 +189,72 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
     updateLatest: opts.updateLatest,
   });
 
-  // Closed, NINE-item list — SB1's structural test fails if a future edit
-  // adds a tenth extension or drops one of these. Settings deliberately
+  // Ardent (2026-10-02): the offensive-security engagement layer. Inert unless
+  // an engagement config names a scope (see src/ardent/extension.ts). Deliberate
+  // extension of the previously-closed list — see no-subagents.test.ts.
+  //
+  // Phase 2 subagents: `spawn_agent` drives a nested in-process AgentSession
+  // (proven by test/ardent-subagent.test.ts) that reuses THIS session's
+  // x-session-id, so the server still sees one lease. Child sessions share the
+  // parent's Ardent state, so the scope gate and evidence store apply to them.
+  const maxSubagentDepth = DEFAULT_MAX_SUBAGENT_DEPTH;
+  // The negotiated per-lease completion budget. 1 unless the server explicitly
+  // advertised more; the runner and the tool's executionMode both read it.
+  const maxConcurrentSubagents = normalizeConcurrencyLimit(opts.maxConcurrentCompletions);
+  const buildSubagentRunner = (state: ArdentSessionState): SubagentRunner =>
+    createArdentSubagentRunner({
+      baseUrl: opts.baseUrl,
+      jwt: opts.jwt,
+      sessionId,
+      models,
+      agentDir: opts.agentDir,
+      maxConcurrent: maxConcurrentSubagents,
+      // Phase A: the role selects the child's tool subset, so a `recon`
+      // subagent structurally cannot record a finding. The depth guard is
+      // layered on top — `spawn_agent` itself is only added while delegation
+      // is still allowed.
+      childTools: (depth, role) =>
+        canSpawnFrom(depth, maxSubagentDepth)
+          ? [...toolsForRole(role), ARDENT_SUBAGENT_TOOL]
+          : toolsForRole(role),
+      childExtensions: (depth, role) => [
+        createArdentChildExtension(state, {
+          depth,
+          maxDepth: maxSubagentDepth,
+          maxConcurrent: maxConcurrentSubagents,
+          createRunner: buildSubagentRunner,
+          role,
+        }),
+      ],
+    });
+
+  const ardentConfigPath = getArdentConfigPath(opts.agentDir);
+  const ardentExtension: InlineExtension = createArdentExtension({
+    loadConfig: () => loadArdentConfigFromFile(ardentConfigPath),
+    persistEvidence: createJsonlEvidenceSink(getArdentEvidencePath(opts.agentDir)),
+    subagent: {
+      depth: 0,
+      maxDepth: maxSubagentDepth,
+      maxConcurrent: maxConcurrentSubagents,
+      createRunner: buildSubagentRunner,
+    },
+    // Show the active model on the Ardent strip. Use the model id, not
+    // resolveModelName()'s catalog display name ("DeepSeek V4 Flash · 1x
+    // usage"), which is too long for a one-line strip.
+    modelName: opts.model || MODEL_ID,
+    // `/ardent` reports the exact path this reads, so a config that landed in
+    // the wrong place is visible instead of mysterious.
+    status: { configPath: ardentConfigPath, configExists: existsSync(ardentConfigPath), version: CLI_VERSION },
+  });
+
+  // Closed, TEN-item list — SB1's structural test fails if a future edit
+  // adds an eleventh extension or drops one of these. Settings deliberately
   // omit `packages` (no pi-packages installed, so no MCP adapter / subagent
   // extension can be pulled in) and pin `defaultTools` to the built-in tool
-  // set (never includes a subagent/background-bash/MCP tool per pi's own
-  // docs — see provider.ts). Pi ships with none of those by default, so
-  // there is nothing else to turn off — free-pi-cli's job is to never opt
-  // back into them.
+  // set. Pi ships with no subagent/background-bash/MCP tools of its own — the
+  // only subagent tool present is Ardent's `spawn_agent`, which is gated on an
+  // engagement and serialized (see ALLOWED_TOOL_NAMES), not a pi package.
+  // free-pi-cli's job is to never opt back into the generic ones.
   const extensionFactories = [
     providerExtension,
     adsExtension,
@@ -172,6 +265,7 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
     toolGuardExtension,
     commandsExtension,
     headerExtension,
+    ardentExtension,
   ];
 
   const settingsManager = SettingsManager.inMemory({

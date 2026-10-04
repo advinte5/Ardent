@@ -18,67 +18,80 @@ function fakeTheme(): ThemeLike {
 
 const MODEL = "DeepSeek V4 Flash";
 
-describe("headerLines (R1-R3, R6)", () => {
-  test("collapsed: exactly 16 lines in R1 order", () => {
+const ENGAGE_COMMANDS = ["/scope", "/ardent", "/findings"];
+const FREE_PI_COMMANDS = [
+  "/usage",
+  "/support",
+  "/tos",
+  "/privacy-policy",
+  "/buy-credits",
+  "/close-other-session",
+  "/update",
+];
+const ALL_COMMANDS = [...ENGAGE_COMMANDS, ...FREE_PI_COMMANDS];
+
+describe("headerLines (ops console)", () => {
+  test("collapsed: 20 lines, led by the ARDENT wordmark and model", () => {
     const lines = headerLines(fakeTheme(), MODEL, false);
-    expect(lines).toHaveLength(16);
+    expect(lines).toHaveLength(20);
     expect(lines[0]).toBe(""); // blank
-    expect(lines[1]).toContain("free-pi");
+    expect(lines[1]).toContain("ARDENT");
     expect(lines[1]).toContain(MODEL);
-    expect(lines[1]).toContain("ctrl+o for help");
-    expect(lines[2]).toBe(""); // blank
-    expect(lines[3]).toContain("Welcome to Free Pi, ad-supported inference. Please visit our advertisers to support us.");
-    expect(lines[4]).toBe(""); // blank
-    expect(lines[5]).toContain("Usage is funded by ads and training. By using free-pi you consent.");
-    expect(lines[6]).toContain("See /tos and /privacy-policy.");
-    expect(lines[7]).toBe(""); // blank
-    // seven command lines
-    expect(lines[8]).toContain("/usage");
-    expect(lines[9]).toContain("/support");
-    expect(lines[10]).toContain("/tos");
-    expect(lines[11]).toContain("/privacy-policy");
-    expect(lines[12]).toContain("/buy-credits");
-    expect(lines[13]).toContain("/close-other-session");
-    expect(lines[14]).toContain("/update");
-    expect(lines[15]).toBe(""); // trailing blank
+    expect(lines[1]).toContain("ctrl+o help");
+    expect(lines[2]).toContain("evidence-first security agent");
+    expect(lines[2]).toContain("host-only");
+    expect(lines[3]).toBe(""); // blank
+    expect(lines.at(-1)).toBe(""); // trailing blank
   });
 
-  test("R2: command lines are in order with descriptions, each starting at the same column", () => {
+  test("commands are grouped under ENGAGE and FREE-PI headings", () => {
     const lines = headerLines(fakeTheme(), MODEL, false);
-    const commandLines = lines.slice(8, 15);
-    const expectedNames = ["/usage", "/support", "/tos", "/privacy-policy", "/buy-credits", "/close-other-session", "/update"];
-    const expectedDescriptions = [
-      "spend and remaining budget today",
-      "visit today's advertiser",
-      "terms of service",
-      "privacy policy",
-      "get more usage",
-      "free a stuck session on another machine",
-      "get the latest free-pi",
-    ];
-    for (const [i, line] of commandLines.entries()) {
-      expect(line.startsWith(`   ${expectedNames[i]}`)).toBe(true);
-      expect(line).toContain(expectedDescriptions[i]);
+    const engageIdx = lines.findIndex((l) => l.includes("ENGAGE"));
+    const freePiIdx = lines.findIndex((l) => l.includes("FREE-PI"));
+    expect(engageIdx).toBeGreaterThan(0);
+    expect(freePiIdx).toBeGreaterThan(engageIdx);
+    // Every Ardent command sits under ENGAGE and before the FREE-PI heading.
+    for (const name of ENGAGE_COMMANDS) {
+      const idx = lines.findIndex((l) => l.includes(name));
+      expect(idx).toBeGreaterThan(engageIdx);
+      expect(idx).toBeLessThan(freePiIdx);
     }
-    // Same column: the description marker `<fg:dim>` starts at the same index in every line.
+    // Every free-pi command sits after the FREE-PI heading.
+    for (const name of FREE_PI_COMMANDS) {
+      expect(lines.findIndex((l) => l.includes(name))).toBeGreaterThan(freePiIdx);
+    }
+  });
+
+  test("command lines keep descriptions aligned at one column, shown dim", () => {
+    const lines = headerLines(fakeTheme(), MODEL, false);
+    const commandLines = lines.filter((l) => ALL_COMMANDS.some((n) => l.trimStart().startsWith(n)));
+    expect(commandLines).toHaveLength(ALL_COMMANDS.length);
     const columns = commandLines.map((l) => l.indexOf("<fg:dim>"));
     expect(new Set(columns).size).toBe(1);
-  });
-
-  test("R3: style markers — free-pi is bold+accent, welcome/descriptions dim, command names unstyled", () => {
-    const lines = headerLines(fakeTheme(), MODEL, false);
-    expect(lines[1]).toContain("<b><fg:accent>free-pi</fg></b>");
-    expect(lines[3]).toBe(` <fg:dim>Welcome to Free Pi, ad-supported inference. Please visit our advertisers to support us.</fg>`);
-    for (const line of lines.slice(8, 15)) {
-      expect(line).toContain("<fg:dim>");
-      // the command name itself (before the dim-wrapped description) carries no marker
+    for (const line of commandLines) {
       const namePart = line.slice(0, line.indexOf("<fg:dim>"));
       expect(namePart).not.toContain("<fg:");
       expect(namePart).not.toContain("<b>");
     }
   });
 
-  test("R6: expanded appends one dim hint line; collapsed omits it", () => {
+  test("style markers — wordmark is bold+accent, meta/tagline/descriptions dim", () => {
+    const lines = headerLines(fakeTheme(), MODEL, false);
+    expect(lines[1]).toContain("<b><fg:accent>▓▒░ ARDENT</fg></b>");
+    expect(lines[1]).toContain(`<fg:dim>  ${MODEL}  ·  ctrl+o help</fg>`);
+    expect(lines[2]).toContain("<fg:dim>");
+    expect(lines.find((l) => l.includes("ENGAGE"))).toContain("<b><fg:accent>ENGAGE</fg></b>");
+  });
+
+  test("the consent line is compact and names /tos and /privacy-policy", () => {
+    const lines = headerLines(fakeTheme(), MODEL, false);
+    const consent = lines.filter((l) => l.includes("you consent"));
+    expect(consent).toHaveLength(1);
+    expect(consent[0]).toContain("/tos");
+    expect(consent[0]).toContain("/privacy-policy");
+  });
+
+  test("expanded appends exactly one dim hint line; collapsed omits it", () => {
     const collapsed = headerLines(fakeTheme(), MODEL, false);
     const expanded = headerLines(fakeTheme(), MODEL, true);
     expect(expanded).toHaveLength(collapsed.length + 1);
@@ -98,9 +111,18 @@ describe("headerLines (R1-R3, R6)", () => {
       expect(line).not.toContain("AD ░▒▓");
     }
   });
+
+  test("leads with ARDENT and surfaces the Ardent commands before free-pi's", () => {
+    const lines = headerLines(fakeTheme(), MODEL, false);
+    expect(lines[1]).toContain("ARDENT");
+    const scopeIdx = lines.findIndex((l) => l.includes("/scope"));
+    const usageIdx = lines.findIndex((l) => l.includes("/usage"));
+    expect(scopeIdx).toBeGreaterThan(0);
+    expect(scopeIdx).toBeLessThan(usageIdx);
+  });
 });
 
-describe("createHeaderExtension (registration, R1/R6)", () => {
+describe("createHeaderExtension (registration)", () => {
   function stubPi() {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
     return {
@@ -166,28 +188,17 @@ describe("createHeaderExtension (registration, R1/R6)", () => {
 
 describe("headerLines width", () => {
   const theme = { fg: (c: string, t: string) => `<${c}>${t}</${c}>`, bold: (t: string) => `<b>${t}</b>` };
-  test("styled lines are never truncated by their escape bytes at 100 columns", () => {
-    const lines = headerLines(theme, "DeepSeek V4 Flash", true, 100);
-    expect(lines[3]).toBe(` <dim>${"Welcome to Free Pi, ad-supported inference. Please visit our advertisers to support us."}</dim>`);
+
+  test("styled lines are not truncated by their escape bytes at 100 columns", () => {
+    const lines = headerLines(theme, MODEL, true, 100);
     expect(lines.some((l) => l.includes("…"))).toBe(false);
   });
-  test("a line wider than the terminal is shown dim and truncated on plain text", () => {
-    const lines = headerLines(theme, "DeepSeek V4 Flash", false, 40);
-    expect(lines[3]).toBe(` <dim>${"Welcome to Free Pi, ad-supported infer…"}</dim>`);
-    expect(lines[3].replace(/<\/?dim>/g, "").length).toBe(40);
-  });
-});
 
-describe("consent lines at 100 columns", () => {
-  const theme = { fg: (c: string, t: string) => `<${c}>${t}</${c}>`, bold: (t: string) => `<b>${t}</b>` };
-  test("neither consent line is truncated at width 100", () => {
-    const lines = headerLines(theme, "DeepSeek V4 Flash", false, 100);
-    const consent = lines.filter((l) => l.includes("you consent") || l.includes("/privacy-policy."));
-    expect(consent).toHaveLength(2);
-    for (const l of consent) {
-      expect(l.includes("…")).toBe(false);
-      expect(l.replace(/<\/?dim>/g, "").length).toBeLessThan(100);
-    }
+  test("a line wider than the terminal is shown dim and truncated on plain text", () => {
+    const lines = headerLines(theme, MODEL, false, 40);
+    const consent = lines.find((l) => l.includes("…"))!;
+    expect(consent).toBeDefined();
+    expect(consent.replace(/<\/?dim>/g, "").length).toBe(40);
   });
 });
 

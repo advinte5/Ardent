@@ -1,0 +1,66 @@
+# Ardent port manifest
+#
+# Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
+# Mirror base commit date: 2026-09-25T19:20:34Z
+# Generated: 2026-10-04T15:12:52Z
+#
+# 'status' is relative to the mirror repo: modified-in-place or new-file.
+# sha256 is of the file AFTER the port.
+#
+status    sha256                                                            monorepo path
+new       20871d56f2b525085002ad6a2db1769ac1085b178740d29a59c7cf6ebce1f167  packages/cli/ARDENT.md
+modified  1632006ea81c5e630fd330e1bb3a0f65e06b3950b2448b15312d8752dfe5cc19  packages/cli/src/paths.ts
+modified  90490749aa0e677e0d8effc8be1a077e4070b2a09a88b3109bfb0b43c3405116  packages/cli/src/pi-launch.ts
+modified  72d8ccf16030d1562e6c509975287283fb89b9feaf6e3dc8da450b7a8d292a9d  packages/cli/src/provider.ts
+modified  2f58353b4ba5d29709e5265f42de192246114e9fa5dc454c235acd75eed5bc7c  packages/cli/src/onboarding.ts
+modified  4eb8ad8e33183ea3f90065544c1ca31debde8a034cbb105e31d698203d2b1649  packages/cli/src/header.ts
+modified  04510e1f59a39c94e7f3e01f50017a1104f0e3116ae729dd873084ecf91547ae  packages/cli/src/run.ts
+modified  d75a91a36c8878e165abab1498fa90f7267111b1a5dc04b02fccde368c06f21d  packages/cli/src/update-check.ts
+modified  f97768600d1c69b47fc62b7d7d7eacbe043c1f2a82dff3dde52ed1b9d61d50a0  packages/cli/src/vendor/shared/api.ts
+modified  b4e0bc20ea8d488e7f1a70f49eccb8bca5fc179d30978ca6021f66cd240f14c9  packages/cli/test/no-subagents.test.ts
+modified  2003f0bb0b2e0845083942c0cf91b472266f14baa375234cbdd886f0aa8ddf12  packages/cli/test/firstrun.test.ts
+modified  ca2c6e9ae8421adcff1058b784cbeed84a8ec863ba00492a9d1fe697e7b10ad2  packages/cli/test/header.test.ts
+new       79f8f4f151bb754310932fdadefdf15d8072e838441f1d1bb22a8c4f9bc6326c  packages/cli/src/ardent/banner.ts
+new       54ed8961e5ae75a32733a9f73f2e868c6c540cde6bc6c7cd33b26b42e7315fec  packages/cli/src/ardent/concurrency.ts
+new       2dad5f14c06f3a81ec2b774f608868f3871b91fb3808ede36115445541ef1dca  packages/cli/src/ardent/config.ts
+new       4fdb1cef11032d9ce5d911963be7082a1a7a3a7c016b2089021ac54df312c2c0  packages/cli/src/ardent/dashboard.ts
+new       b169da624d5e8438f1084d83b48179d3006b2b7ca450d6630208329ee8526aa3  packages/cli/src/ardent/evidence.ts
+new       abc2add75901e880edf02035a34fbb9cf138b142c94b1331bbeb238f2c7545a8  packages/cli/src/ardent/extension.ts
+new       6e54481587d6084ae1f674651116e66b9908af3c4771b371cd2c2d0341cc9c5f  packages/cli/src/ardent/gate.ts
+new       d4146b35acfcdf2c22dff08f3d6b53c9b85b387aa4d7d898a87894f552edd357  packages/cli/src/ardent/hud.ts
+new       0000ef11717158a56927002a11ee41ae0be8dde34da81485a31c4f150d568c24  packages/cli/src/ardent/index.ts
+new       a1e0c593eb30e45eb454d976da63fb5ef29503520f63fb6b0faf6b847e78630e  packages/cli/src/ardent/io.ts
+new       fd51a64c7c81c0eee8c69e03531cf647e3cc506a97fe4aec0984062618d2523a  packages/cli/src/ardent/memory.ts
+new       ac8fdf596cba83c00e8a5d5418e8441eeaffc9dd078f2cb45459826812586ff7  packages/cli/src/ardent/overlay.ts
+new       a283b93c8c7a65d47c2cce32b909713d840a3968fc11f102d6f4c257f6ac78d3  packages/cli/src/ardent/prompt.ts
+new       5a1a41ae1c3a6c1dd2007303b7d7fb199b684c1dca7420951caf2f0bba3d7d7a  packages/cli/src/ardent/refusal.ts
+new       4850aad08f6a8eae5009aba11e9713773c479686c81a794ca5a54bb8bf211511  packages/cli/src/ardent/render.ts
+new       76c6a5e4bc37e7cb8e0471518d7067286e67fecb34db14d1e82f4b7fa560adab  packages/cli/src/ardent/roles.ts
+new       ebc774f31f1b25ee548d495a9e4a44f541f4d22aa6edb7bb7cf55fd220f4fd59  packages/cli/src/ardent/scope.ts
+new       a1a7c9695c9fe64b84d700a78b971c1e6bae456a5ba2f4978787244991a644c1  packages/cli/src/ardent/screenshot.ts
+new       8a99d196b9c5106390c97f4e6a0095dca04eca0832cbcf475f4d65bc3d6c6b01  packages/cli/src/ardent/subagent-runtime.ts
+new       c74192b4f166fc1874fa436cb0da41272b51172fd5ecb1976149406e84089550  packages/cli/src/ardent/subagent.ts
+new       df64de0e46d90b6350089185d045a156cc7262c3037f6a663a4f21dca7d72a3f  packages/cli/src/ardent/theme.ts
+new       276f2700f504aadd862059f6f367d1364d106ccb62a8e93114e1e6d3eb5d87a4  packages/cli/src/ardent/types.ts
+new       ec10192470e5a39de2d03e2e293d97ce863704caefab116994ae33911ba6f269  packages/cli/test/ardent-banner.test.ts
+new       4fa9d1ea48e5f461a593d480c6cc05c7b42f459ee54a828b6b7aa89f1fdfd910  packages/cli/test/ardent-concurrency.test.ts
+new       94cc8610d379d105fa4b0814ad246a971c2937c3cc5c8ad9995e0da88f84e53a  packages/cli/test/ardent-dashboard.test.ts
+new       07dde151f7b65faceb49b49f518df8b657a66aa80380e960c3f38a507b630622  packages/cli/test/ardent-evidence.test.ts
+new       325bcd6a7db51bcc43b7ac0e5910fd2db93bacf9d9e65f6ae9b1a1a16b2ad38c  packages/cli/test/ardent-extension.test.ts
+new       444895d5e5ad9f9873b49bce50dd7f5127635ab63a952cd59e9ffe44ab9b1aaf  packages/cli/test/ardent-gate.test.ts
+new       8ba83e5545a41e07179bc56e96755f73f7f263460fe280c4e307e90aeac311f7  packages/cli/test/ardent-hud.test.ts
+new       5e863118d725f32d8d00b11851fb6bf6a507c6f82e6c2438b72e1b65f5071df1  packages/cli/test/ardent-memory.test.ts
+new       f773cda31e354511c576b9c3025daab0063a0700e9a7d62d7adb93e655d1ac41  packages/cli/test/ardent-negotiation.test.ts
+new       7ddc941f160822e3436583dc9cf35f43902ce7ed31821715bb175de0e53207c8  packages/cli/test/ardent-overlay.test.ts
+new       0e11e05bc36272c657bd725e277af068849fe675a4e4d9bfe3f32c4524a246cd  packages/cli/test/ardent-prompt.test.ts
+new       af04c693ed504f8a4e11fbff4fc0c319f2befb5867621acee66a3aba357af170  packages/cli/test/ardent-refusal.test.ts
+new       16250a44666657ca36500cfebced83091900565f87ed23685518ab94618bd165  packages/cli/test/ardent-relations.test.ts
+new       89a8504ad6d02ba44fc77c101faada0450bcca5078f5f694b2854943b9b2f642  packages/cli/test/ardent-render.test.ts
+new       17bebc6fa72e8ad63e21e921636a16a6fb4074cb834a57fd1c066f8aa65e72da  packages/cli/test/ardent-roles.test.ts
+new       736c71e1c254d8bd6858c3b5e3f466bf9adec7dcd910f75d288ece1d06f2d37e  packages/cli/test/ardent-scope.test.ts
+new       fadc3dd7c31c3efece26f7510bf5701edd1e1820efcc6e67a67e82a57fd959d5  packages/cli/test/ardent-screenshot.test.ts
+new       efb6993fa89d5f24d5442f345185861fbd774b23cd7681169ffc51811d7eabf2  packages/cli/test/ardent-subagent-runtime.test.ts
+new       09c84efe6c031ecbef9cabd44e4e10969f441970534e5a17aab73acc1c9800fc  packages/cli/test/ardent-subagent-tool.test.ts
+new       4dd863e78b3413fd02419fbd169a89dfc9ea274bc67d0bced3a8cfc6bca3b9d2  packages/cli/test/ardent-subagent.test.ts
+new       889f1aadea35fe1fa65f262bd8949491e0f481b04febbaaa8288132bf8cb2a1d  packages/cli/test/ardent-theme.test.ts
+new       e9c91ba69b9da7b8c3ad726a5090d9104fadee6d6bed04743023bf85186d7379  packages/cli/test/ardent-vision.test.ts

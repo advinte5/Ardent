@@ -1,8 +1,19 @@
 // U1: replaces pi's built-in startup header (hidden via quietStartup, see
-// pi-launch.ts) with a short free-pi header — name, model, welcome line, and
-// the five commands a user needs. KTD1/KTD2: a plain object component
-// (render/invalidate/setExpanded), no @earendil-works/pi-tui dependency —
-// same structural-typing approach as packages/pi-ads/src/style.ts.
+// pi-launch.ts) with the Ardent console header — wordmark, model, one-line
+// identity, and the commands grouped by what they act on. KTD1/KTD2: a plain
+// object component (render/invalidate/setExpanded), no @earendil-works/pi-tui
+// dependency — same structural-typing approach as packages/pi-ads/src/style.ts.
+//
+// 2026-10-03: leads with ARDENT, not free-pi. Running `ardent` used to show a
+// header indistinguishable from plain `freepi`; the Ardent layer only owned the
+// HUD strip near the editor, so the first ~13 lines a user read said nothing
+// about the product they launched. The Ardent commands now come first.
+//
+// 2026-10-04 (ops workover): the header was a flat wall of dim text — welcome,
+// consent, then ten undifferentiated command lines. It now leads with a
+// wordmark, states what the tool is in one line, and splits commands into
+// ENGAGE (Ardent) and FREE-PI (account/plumbing) groups so the eye can skip
+// the plumbing. Palette follows the Ardent theme (amber signal accent).
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 
 /** Structural subset of pi's `Theme` class actually used for styling. */
@@ -16,27 +27,32 @@ export interface TuiLike {
   requestRender(): void;
 }
 
-// R2: fixed command list, in order, with descriptions. Names padded so every
-// description starts at the same column.
-const COMMANDS: ReadonlyArray<{ name: string; description: string }> = [
-  { name: "/usage", description: "spend and remaining budget today" },
-  { name: "/support", description: "visit today's advertiser" },
-  { name: "/tos", description: "terms of service" },
-  { name: "/privacy-policy", description: "privacy policy" },
-  { name: "/buy-credits", description: "get more usage" },
-  { name: "/close-other-session", description: "free a stuck session on another machine" },
-  { name: "/update", description: "get the latest free-pi" },
+/** The console wordmark. Scanline glyphs match the ad card's accent. */
+const WORDMARK = "▓▒░ ARDENT";
+
+// R2: fixed command list, grouped, in order, with descriptions. Names padded so
+// every description starts at the same column. Ardent's commands lead — they are
+// what a user of this product is looking for — followed by free-pi's.
+const COMMANDS: ReadonlyArray<{ group: string; name: string; description: string }> = [
+  { group: "ENGAGE", name: "/scope", description: "show the Ardent engagement scope" },
+  { group: "ENGAGE", name: "/ardent", description: "Ardent build, engagement and evidence status" },
+  { group: "ENGAGE", name: "/findings", description: "recorded findings, verified first" },
+  { group: "FREE-PI", name: "/usage", description: "spend and remaining budget today" },
+  { group: "FREE-PI", name: "/support", description: "visit today's advertiser" },
+  { group: "FREE-PI", name: "/tos", description: "terms of service" },
+  { group: "FREE-PI", name: "/privacy-policy", description: "privacy policy" },
+  { group: "FREE-PI", name: "/buy-credits", description: "get more usage" },
+  { group: "FREE-PI", name: "/close-other-session", description: "free a stuck session on another machine" },
+  { group: "FREE-PI", name: "/update", description: "get the latest free-pi" },
 ];
 
 const NAME_COLUMN = 24; // 2 leading spaces + longest name (20) + 2 spaces gap
 
-const WELCOME_LINE =
-  "Welcome to Free Pi, ad-supported inference. Please visit our advertisers to support us.";
+// One line, so it fits the truncation rule in headerLines without ever being
+// cut off with an ellipsis at a normal terminal width.
+const TAGLINE = "evidence-first security agent · host-only · ads fund inference";
 
-// Split into two lines rather than one 106-char line, so it fits the 100-column
-// truncation rule in headerLines without ever being cut off with an ellipsis.
-const CONSENT_LINE_1 = "Usage is funded by ads and training. By using free-pi you consent.";
-const CONSENT_LINE_2 = "See /tos and /privacy-policy.";
+const CONSENT_LINE = "Usage is funded by ads and training. By using free-pi you consent. See /tos and /privacy-policy.";
 
 const EXPANDED_HINT_LINE = "esc interrupt · ctrl+c clear / exit · / commands · ! bash";
 
@@ -90,29 +106,37 @@ export function headerLines(
   const fit = (plain: string, styled: () => string): string =>
     plain.length <= inner ? styled() : theme.fg("dim", truncate(plain, inner));
 
-  const titleRest = ` · ${modelName} · ctrl+o for help`;
-  const title = fit(
-    `free-pi${titleRest}`,
-    () => `${theme.bold(theme.fg("accent", "free-pi"))}${theme.fg("dim", titleRest)}`,
+  const brandRest = `  ${modelName}  ·  ctrl+o help`;
+  const brand = fit(
+    `${WORDMARK}${brandRest}`,
+    () => `${theme.bold(theme.fg("accent", WORDMARK))}${theme.fg("dim", brandRest)}`,
   );
 
-  const commandLines = COMMANDS.map(({ name, description }) => {
+  const groupHeading = (group: string): string =>
+    fit(`▸ ${group}`, () => `${theme.fg("accent", "▸")} ${theme.bold(theme.fg("accent", group))}`);
+
+  const commandLine = ({ name, description }: { name: string; description: string }): string => {
     const padded = `  ${name}`.padEnd(NAME_COLUMN, " ");
     return fit(`${padded}${description}`, () => `${padded}${theme.fg("dim", description)}`);
-  });
+  };
 
   const dim = (plain: string) => fit(plain, () => theme.fg("dim", plain));
 
+  const engage = COMMANDS.filter((c) => c.group === "ENGAGE");
+  const freePi = COMMANDS.filter((c) => c.group === "FREE-PI");
+
   const lines = [
     "",
-    title,
+    brand,
+    dim(TAGLINE),
     "",
-    dim(WELCOME_LINE),
+    groupHeading("ENGAGE"),
+    ...engage.map(commandLine),
     "",
-    dim(CONSENT_LINE_1),
-    dim(CONSENT_LINE_2),
+    groupHeading("FREE-PI"),
+    ...freePi.map(commandLine),
     "",
-    ...commandLines,
+    dim(CONSENT_LINE),
     "",
   ];
   if (expanded) lines.push(dim(EXPANDED_HINT_LINE));

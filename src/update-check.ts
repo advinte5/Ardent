@@ -14,6 +14,12 @@ export interface ClientVersionCheck {
   models?: Array<{ id: string; name: string }>;
   /** Optional one-line startup notice (e.g. a trial data-handling disclosure). */
   notice?: string;
+  /**
+   * Per-lease completion concurrency advertised by the server
+   * (`max_concurrent_completions`). Absent means the client keeps its
+   * serialized default of 1; see `src/ardent/concurrency.ts`.
+   */
+  maxConcurrentCompletions?: number;
 }
 
 export async function checkClientVersion(
@@ -28,13 +34,19 @@ export async function checkClientVersion(
     if (!res.ok) return { action: "ok" };
     const parsed = ClientVersionResponseSchema.safeParse(await res.json());
     if (!parsed.success) return { action: "ok" };
-    const { min, latest, model, models, notice } = parsed.data;
-    // Only attach model/models/notice when present, so a plain {min,latest}
+    const { min, latest, model, models, notice, max_concurrent_completions } = parsed.data;
+    // Only attach the optional fields when present, so a plain {min,latest}
     // response still returns exactly {action,...} (keeps the shape minimal).
-    const extra: { model?: string; models?: Array<{ id: string; name: string }>; notice?: string } = {};
+    const extra: {
+      model?: string;
+      models?: Array<{ id: string; name: string }>;
+      notice?: string;
+      maxConcurrentCompletions?: number;
+    } = {};
     if (model !== undefined) extra.model = model;
     if (models !== undefined) extra.models = models;
     if (notice !== undefined) extra.notice = notice;
+    if (max_concurrent_completions !== undefined) extra.maxConcurrentCompletions = max_concurrent_completions;
 
     if (compareVersions(cliVersion, min) === -1) return { action: "block", latest, ...extra };
     if (compareVersions(cliVersion, latest) === -1) return { action: "notice", latest, ...extra };

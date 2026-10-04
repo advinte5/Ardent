@@ -95,4 +95,36 @@ describe("checkClientVersion (#37)", () => {
       expect(await checkClientVersion("https://api.test", "0.3.0", fetchImpl)).toEqual({ action: "ok" });
     });
   });
+
+  describe("subagent concurrency negotiation", () => {
+    test("a server-advertised limit is threaded through", async () => {
+      const fetchImpl = fakeFetch(() =>
+        Response.json({ min: "0.1.0", latest: "0.3.0", max_concurrent_completions: 3 }),
+      );
+      expect(await checkClientVersion("https://api.test", "0.3.0", fetchImpl)).toEqual({
+        action: "ok",
+        maxConcurrentCompletions: 3,
+      });
+    });
+
+    test("absent → the field is not attached (client keeps its default of 1)", async () => {
+      const fetchImpl = fakeFetch(() => Response.json({ min: "0.1.0", latest: "0.3.0" }));
+      const result = await checkClientVersion("https://api.test", "0.3.0", fetchImpl);
+      expect(result).toEqual({ action: "ok" });
+      expect("maxConcurrentCompletions" in result).toBe(false);
+    });
+
+    test("a malformed value must not disable the update gate", async () => {
+      // The limit is clamped client-side; a bad number here must never make the
+      // whole response fail to parse, which would discard min/latest entirely.
+      const fetchImpl = fakeFetch(() =>
+        Response.json({ min: "0.9.0", latest: "0.9.0", max_concurrent_completions: -1 }),
+      );
+      expect(await checkClientVersion("https://api.test", "0.3.0", fetchImpl)).toEqual({
+        action: "block",
+        latest: "0.9.0",
+        maxConcurrentCompletions: -1,
+      });
+    });
+  });
 });

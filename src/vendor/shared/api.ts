@@ -187,6 +187,18 @@ export const ClientVersionResponseSchema = z.object({
   // is the picker label. Optional so a plain response still parses — the CLI
   // falls back to the single `model` field.
   models: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
+  /**
+   * The per-lease completion concurrency the server is willing to honor. Absent
+   * (or out of range) means the client keeps its serialized default of 1. This
+   * is a capability flag, not a value: presence opts the client into parallel
+   * subagent completions, which are otherwise rejected with `concurrent` (429).
+   *
+   * Deliberately an unconstrained number: the client clamps it (see
+   * `src/ardent/concurrency.ts`), and a malformed value must NOT fail this whole
+   * schema — that would discard `min`/`latest` and silently disable the update
+   * gate.
+   */
+  max_concurrent_completions: z.number().optional(),
 });
 export type ClientVersionResponse = z.infer<typeof ClientVersionResponseSchema>;
 

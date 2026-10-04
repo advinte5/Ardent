@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Ardent launcher: runs the CLI built from this checkout, from any directory.
+#
+# This is a local-dev convenience, NOT part of the published package (it is not
+# in the mirror/port surface). Install it on PATH with:
+#   ln -sf "$(pwd)/bin/ardent" ~/.local/bin/ardent
+#
+# It resolves the repo root from its own real location, so it keeps working if
+# the checkout moves — as long as the symlink points at the current file.
+#
+# dist/ is gitignored, so the bundle goes stale after a pull or a mirror sync.
+# If any file under src/ is newer than dist/index.js, rebuild first; otherwise
+# exec the existing build immediately. A failed rebuild is only a warning: the
+# previous build still runs.
+set -euo pipefail
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
+ENTRY="$REPO/dist/index.js"
+
+BUILD_HINT="Build it first:
+  (cd \"$REPO\" && ./node_modules/@oven/bun-linux-x64/bin/bun build src/index.ts \\
+     --target=node --outdir dist --splitting \\
+     --external @earendil-works/pi-coding-agent \\
+     --banner '#!/usr/bin/env node')
+
+(Or, with bun on PATH: cd \"$REPO\" && bun run build)"
+
+# bun is not always on PATH (here it ships as a node_modules platform package),
+# so prefer the local one and fall back to whatever the shell can find.
+find_bun() {
+    local candidate
+    for candidate in \
+        "$REPO/node_modules/@oven/bun-linux-x64/bin/bun" \
+        "$REPO/node_modules/.bin/bun"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    if command -v bun >/dev/null 2>&1; then
+        command -v bun
+        return 0
+    fi
+    return 1
+}
+
+# True when the bundle is missing, or older than some source file.
+needs_build() {
+    [ -f "$ENTRY" ] || return 0
+    [ -n "$(find "$REPO/src" -name '*.ts' -newer "$ENTRY" -print -quit 2>/dev/null)" ]
+}
+
+rebuild() {
+    local bun
+    bun="$(find_bun)" || {
+        echo "ardent: cannot rebuild (bun not found); running the existing build" >&2
+        return 0
+    }
+
+    # One rebuild at a time, so two terminals don't race on the same dist/.
+    local lock="$REPO/dist/.build.lock"
+    local waited=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        waited=$((waited + 1))
+        # Another terminal is building (or left a lock behind): just try to run.
+        [ "$waited" -gt 100 ] && return 0
+        sleep 0.1
+    done
+    # The lock must be cleared explicitly: we `exec` below, which replaces this
+    # shell without running an EXIT trap.
+    trap 'rmdir "$lock" 2>/dev/null || true' EXIT INT TERM
+
+    echo "ardent: sources changed, rebuilding…" >&2
+    local output
+    # Quiet on success; the build's own output is only worth showing on failure.
+    if ! output="$(cd "$REPO" && "$bun" build src/index.ts --target=node --outdir dist --splitting \
+        --external @earendil-works/pi-coding-agent --banner '#!/usr/bin/env node' 2>&1)"; then
+        echo "ardent: rebuild failed; running the existing build" >&2
+        printf '%s\n' "$output" >&2
+    fi
+
+    rmdir "$lock" 2>/dev/null || true
+    trap - EXIT INT TERM
+}
+
+if [ -f "$ENTRY" ] && needs_build; then
+    rebuild
+fi
+
+if [ ! -f "$ENTRY" ]; then
+    cat >&2 <<EOF
+ardent: build not found at $ENTRY
+
+$BUILD_HINT
+EOF
+    exit 1
+fi
+
+exec node "$ENTRY" "$@"

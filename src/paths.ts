@@ -22,3 +22,22 @@ export function getLastSeenVersionPath(agentDir: string = getFreePiAgentDir()): 
 export function getConfigPath(): string {
   return join(homedir(), FREE_PI_DIR_NAME, "config.json");
 }
+
+// ---- Ardent engagement layer ----------------------------------------------
+// Ardent's per-engagement state lives under the free-pi agent dir so it stays
+// namespaced with the rest of the CLI and separate from any `~/.pi` install.
+
+/** Ardent's state directory: `<agentDir>/ardent`. */
+export function getArdentDir(agentDir: string = getFreePiAgentDir()): string {
+  return join(agentDir, "ardent");
+}
+
+/** The engagement config: `<agentDir>/ardent/engagement.json`. */
+export function getArdentConfigPath(agentDir: string = getFreePiAgentDir()): string {
+  return join(getArdentDir(agentDir), "engagement.json");
+}
+
+/** The append-only evidence log: `<agentDir>/ardent/evidence.jsonl`. */
+export function getArdentEvidencePath(agentDir: string = getFreePiAgentDir()): string {
+  return join(getArdentDir(agentDir), "evidence.jsonl");
+}

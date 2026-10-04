@@ -73,7 +73,13 @@ export function buildProviderConfig(
       id: m.id,
       name: m.name,
       reasoning: false,
-      input: ["text"] as const,
+      // Ardent screenshots: pi attaches images to the request only when the
+      // active model advertises the modality, so `ardent_screenshot` is blind
+      // without this. The upstream model behind the free/ad-funded path is
+      // multimodal; the catalog does not yet advertise per-model capabilities,
+      // so this is a deliberate blanket declaration — revisit when
+      // /client-version reports modalities, and gate it then.
+      input: ["text", "image"] as const,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 1_048_576,
       maxTokens: 8192,

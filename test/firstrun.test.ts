@@ -152,10 +152,10 @@ describe("#63 first-run onboarding intro", () => {
 
     expect(code).toBe(0);
     const combined = logs.join("\n");
-    expect(combined).toContain("Welcome to free-pi");
+    expect(combined).toContain("Ardent — an evidence-first security agent");
     // Must appear BEFORE the device-login line the user has to read, so it
     // survives the pi TUI taking over the screen.
-    const introIdx = combined.indexOf("Welcome to free-pi");
+    const introIdx = combined.indexOf("Ardent — an evidence-first security agent");
     const loginIdx = combined.indexOf(USER_CODE);
     expect(introIdx).toBeGreaterThanOrEqual(0);
     expect(loginIdx).toBeGreaterThan(introIdx);
@@ -180,7 +180,7 @@ describe("#63 first-run onboarding intro", () => {
     );
 
     expect(code).toBe(0);
-    expect(logs.join("\n")).not.toContain("Welcome to free-pi");
+    expect(logs.join("\n")).not.toContain("evidence-first security agent");
   });
 
   test("FREEPI_NO_INTRO suppresses it; default shows the full text (unit)", () => {

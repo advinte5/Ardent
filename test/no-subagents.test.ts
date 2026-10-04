@@ -31,6 +31,7 @@ import { MODEL_ID, SAFE_TOOLS } from "../src/provider";
 import { USAGE_TOOL_NAME } from "../src/usage-tool";
 import { BUY_TOOL_NAME } from "../src/buy-tool";
 import { DOCS_TOOL_NAME } from "../src/docs-tool";
+import { ARDENT_SUBAGENT_TOOL, ARDENT_TOOL_NAMES } from "../src/ardent/extension";
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -41,16 +42,18 @@ function baseOpts(baseUrl: string): LaunchOptions {
 }
 
 describe("closed extension list (#28 R20, SB1)", () => {
-  test("buildRuntimeOptions registers exactly the nine known extensions — no more, no less", () => {
+  test("buildRuntimeOptions registers exactly the ten known extensions — no more, no less", () => {
     const opts = buildRuntimeOptions(baseOpts("http://example.test"), "session-a");
     // #226: the closed set deliberately grew to six with free-pi-buy-tool;
     // 2026-09-01: to seven with free-pi-error-notice (one readable line on a
     // 429); 2026-09-03: to eight with free-pi-header (the startup header,
     // U1/U2); 2026-09-03: to nine with free-pi-docs-tool (the free_pi_docs
-    // tool, U2). Any further addition must be a reviewed, deliberate edit —
-    // never accidental.
+    // tool, U2); 2026-10-02: to ten with free-pi-ardent (the offensive-security
+    // engagement layer). Any further addition must be a reviewed, deliberate
+    // edit — never accidental.
     expect([...opts.extensionNames].sort()).toEqual(
       [
+        "free-pi-ardent",
         "free-pi-ads",
         "free-pi-buy-tool",
         "free-pi-commands",
@@ -77,9 +80,11 @@ describe("closed extension list (#28 R20, SB1)", () => {
     expect(settings.quietStartup).toBe(true);
   });
 
-  test("the strict SDK tools allowlist is exactly SAFE_TOOLS plus the three legitimate custom tools", () => {
+  test("the strict SDK tools allowlist is exactly SAFE_TOOLS plus the legitimate custom tools", () => {
     const opts = buildRuntimeOptions(baseOpts("http://example.test"), "session-c");
-    expect([...opts.tools].sort()).toEqual([...SAFE_TOOLS, USAGE_TOOL_NAME, BUY_TOOL_NAME, DOCS_TOOL_NAME].sort());
+    expect([...opts.tools].sort()).toEqual(
+      [...SAFE_TOOLS, USAGE_TOOL_NAME, BUY_TOOL_NAME, DOCS_TOOL_NAME, ...ARDENT_TOOL_NAMES, ARDENT_SUBAGENT_TOOL].sort(),
+    );
   });
 
   test("resolveModelName (KTD6): catalog name, then model id, then MODEL_ID", () => {
@@ -109,12 +114,20 @@ describe("closed extension list (#28 R20, SB1)", () => {
     ).toBe(MODEL_ID);
   });
 
-  test("SAFE_TOOLS / ALLOWED_TOOL_NAMES never contain a subagent/background-execution tool name", () => {
-    const forbidden = ["subagent", "background_bash", "task", "agent", "sub_agent", "spawn_agent"];
-    for (const name of forbidden) {
+  test("the only subagent-named entry is Ardent's deliberate, gated spawn_agent", () => {
+    // Ardent Phase 2 added exactly one delegation tool on purpose. Every OTHER
+    // generic subagent/background-execution name stays banned. spawn_agent is
+    // safe to allow because it (a) refuses outside an engagement, (b) is
+    // executionMode:"sequential", and (c) drives an in-process nested session
+    // that reuses the parent's x-session-id — its own test proves maxOpen <= 1.
+    expect(ALLOWED_TOOL_NAMES).toContain(ARDENT_SUBAGENT_TOOL);
+    expect(ALLOWED_TOOL_NAMES.filter((n) => n === "spawn_agent")).toHaveLength(1);
+    for (const name of ["subagent", "background_bash", "task", "agent", "sub_agent"]) {
       expect(SAFE_TOOLS as readonly string[]).not.toContain(name);
       expect(ALLOWED_TOOL_NAMES).not.toContain(name);
     }
+    // SAFE_TOOLS (the built-in set) is untouched by the Ardent addition.
+    expect(SAFE_TOOLS as readonly string[]).not.toContain(ARDENT_SUBAGENT_TOOL);
   });
 });
 

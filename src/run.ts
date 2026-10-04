@@ -149,6 +149,7 @@ export async function run(deps: RunDeps, argv: readonly string[] = process.argv)
     model: versionCheck.model,
     models: versionCheck.models,
     updateLatest,
+    maxConcurrentCompletions: versionCheck.maxConcurrentCompletions,
   });
 
   // First user feedback (2026-08-17): after closing the terminal, users didn't
