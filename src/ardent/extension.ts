@@ -29,7 +29,7 @@ import {
   lastAssistantText,
   recoveryMessage,
 } from "./refusal";
-import type { Confidence, FindingStatus, RelationKind, Severity, VerificationOutcome, WorkingMemory } from "./types";
+import type { Confidence, ErrorCode, FindingStatus, RelationKind, Severity, VerificationOutcome, WorkingMemory } from "./types";
 import { emptyWorkingMemory } from "./types";
 import {
   ARDENT_SCREENSHOT_TOOL,
@@ -264,6 +264,18 @@ const SCREENSHOT_PARAMS = Type.Object({
   height: Type.Optional(Type.Number({ description: "Viewport height in CSS px.", default: 800 })),
 });
 
+/**
+ * The contract code for a store that has lost a durable write, plus the one
+ * sentence the evidence tools refuse with. Module-level so every tool refusal
+ * reads identically and `details.code` is the same value everywhere. The gate
+ * phrases its own reason for its own audience (rule 0 in `gate.ts`), but
+ * branches on the same `EvidenceStore.degraded` flag, so the two cannot drift
+ * apart without someone changing the flag itself.
+ */
+const STORAGE_UNAVAILABLE = "storage_unavailable";
+const STORAGE_REASON =
+  "the audit store cannot commit new evidence (a durable write failed), so this engagement is read-only until it is durable again";
+
 const LINK_PARAMS = Type.Object({
   from: Type.String({ description: "Finding id (find-N) that holds." }),
   to: Type.String({ description: "Finding id (find-N) that follows as a result." }),
@@ -274,6 +286,14 @@ const LINK_PARAMS = Type.Object({
   note: Type.Optional(Type.String({ description: "One line on the mechanism." })),
 });
 
+/**
+ * Every refusal code a tool result can carry: the domain's typed rejections
+ * (validation, missing_citation, …) plus the command contract's operational
+ * codes (storage_unavailable, …). The TUI row prints it verbatim, and callers
+ * branch on it instead of parsing the sentence.
+ */
+type RefusalCode = EvidenceErrorCode | ErrorCode;
+
 interface LinkToolDetails {
   ok: boolean;
   relation_id?: string;
@@ -282,6 +302,9 @@ interface LinkToolDetails {
   kind?: RelationKind;
   note?: string;
   chains?: number;
+  /** Typed refusal (domain rejection, or a contract code like storage_unavailable). */
+  code?: RefusalCode;
+  error?: string;
 }
 
 interface NoteToolDetails {
@@ -289,6 +312,9 @@ interface NoteToolDetails {
   observation_id?: string;
   summary?: string;
   target?: string;
+  /** Typed refusal, so the TUI row can say why it was not recorded. */
+  code?: RefusalCode;
+  error?: string;
 }
 
 interface FindingToolDetails {
@@ -301,7 +327,7 @@ interface FindingToolDetails {
   observation_count?: number;
   artifact_count?: number;
   /** Typed refusal (validation / foreign_reference / missing_citation / …). */
-  code?: EvidenceErrorCode;
+  code?: RefusalCode;
   error?: string;
 }
 
@@ -317,7 +343,7 @@ interface VerifyToolDetails {
   promoted?: boolean;
   /** The finding's status after the attempt. */
   status?: FindingStatus;
-  code?: EvidenceErrorCode;
+  code?: RefusalCode;
   error?: string;
 }
 
@@ -328,6 +354,9 @@ interface ScreenshotToolDetails {
   bytes?: number;
   sha256?: string;
   path?: string;
+  /** Typed refusal (scope denial, read-only mode, capture failure). */
+  code?: RefusalCode;
+  error?: string;
 }
 
 /**
@@ -375,6 +404,24 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
       },
     ],
     details: { ok: false as const },
+  });
+
+  /**
+   * Read-only mode. A durable evidence write has already failed, so nothing
+   * new enters the record: the engagement keeps working for reading and
+   * reporting what is *already* committed, but it must not accept new
+   * evidence it cannot store. The typed code is what makes this
+   * distinguishable in the tool result and the TUI row from the far more
+   * common "no engagement" refusal, and from a domain rejection.
+   */
+  const storageGated = () => ({
+    content: [
+      {
+        type: "text" as const,
+        text: `Rejected: ${STORAGE_UNAVAILABLE} — ${STORAGE_REASON}`,
+      },
+    ],
+    details: { ok: false as const, code: STORAGE_UNAVAILABLE, error: STORAGE_REASON },
   });
 
   /** Diagnostic facts for `/ardent`. pi-launch passes the exact config path. */
@@ -726,6 +773,11 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
             input: (event.input ?? {}) as Record<string, unknown>,
             scope: state.config!.scope,
             cwd: ctx.cwd,
+            // Read-only mode: the store has lost a durable write, so target
+            // execution stops (hard release invariant / W16). Passed in here
+            // so the rule lives with the rest of the gate rather than in a
+            // special case beside it.
+            persistenceDegraded: state.evidence.degraded,
           });
         } catch (err) {
           const why = err instanceof Error ? err.message : String(err);
@@ -838,6 +890,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
         },
         async execute(_toolCallId, params) {
           if (!engaged()) return evidenceGated();
+          if (state.evidence.degraded) return storageGated();
           const observation = state.evidence.addObservation({
             source: params.source ?? "agent",
             summary: params.summary,
@@ -880,6 +933,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
         },
         async execute(_toolCallId, params) {
           if (!engaged()) return evidenceGated();
+          if (state.evidence.degraded) return storageGated();
           const result = state.evidence.addFinding({
             title: params.title,
             severity: params.severity as Severity,
@@ -938,6 +992,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
         },
         async execute(_toolCallId, params) {
           if (!engaged()) return evidenceGated();
+          if (state.evidence.degraded) return storageGated();
           const result = state.evidence.addVerification({
             findingId: params.finding_id,
             passed: params.passed,
@@ -1008,6 +1063,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
         },
         async execute(_toolCallId, params) {
           if (!engaged()) return evidenceGated();
+          if (state.evidence.degraded) return storageGated();
           const result = state.evidence.addRelation({
             from: params.from,
             to: params.to,
@@ -1072,6 +1128,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
         },
         async execute(_toolCallId, params, signal) {
           if (!engaged()) return evidenceGated();
+          if (state.evidence.degraded) return storageGated();
 
           const target = normalizeScreenshotUrl(params.url);
           if (!target.ok || target.url === undefined || target.host === undefined) {

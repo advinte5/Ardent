@@ -138,6 +138,15 @@ describe("ardent_note rows", () => {
     expect(line).toContain("no active engagement");
     expect(line).not.toContain("◦ recorded");
   });
+
+  test("a storage refusal says storage_unavailable, not 'no active engagement'", () => {
+    // The store lost a durable write; telling the operator their note was
+    // merely out of engagement would explain the wrong failure entirely.
+    const [line] = noteResultLines(plain, { ok: false, code: "storage_unavailable" }, 80);
+    expect(line).toContain("not recorded");
+    expect(line).toContain("storage_unavailable");
+    expect(line).not.toContain("no active engagement");
+  });
 });
 
 describe("ardent_finding rows", () => {

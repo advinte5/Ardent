@@ -643,3 +643,99 @@ describe("free-pi-ardent extension", () => {
     expect(result.content[0]!.text).toContain("child done");
   });
 });
+
+describe("free-pi-ardent extension — read-only mode", () => {
+  /** A store whose durable write throws: the exact failure that degrades it. */
+  function failingEvidence() {
+    return new EvidenceStore({
+      persist: () => {
+        throw new Error("ENOSPC: no space left on device");
+      },
+    });
+  }
+
+  async function buildDegraded() {
+    const evidence = failingEvidence();
+    const ext = createArdentExtension({
+      loadConfig: () => engagedConfig,
+      evidence,
+    }) as { factory: (pi: ExtensionAPI) => void };
+    const fake = createFakePi();
+    ext.factory(fake.pi);
+    await fake.handlers.get("session_start")![0]!({}, makeCtx());
+    // The write that fails is what flips the store: degraded for the rest of
+    // the run, because the failed record never reached the file.
+    evidence.addObservation({ source: "nmap", summary: "port 22 open", target: "10.0.0.5" });
+    expect(evidence.degraded).toBe(true);
+    expect(evidence.persistenceError).toContain("ENOSPC");
+    return { evidence, ...fake };
+  }
+
+  test("the gate stops target execution once a durable write has failed", async () => {
+    const { handlers } = await buildDegraded();
+    const result = (await handlers.get("tool_call")![0]!(
+      { toolName: "bash", input: { command: "nmap 10.0.0.5" } },
+      makeCtx(),
+    )) as { block?: boolean; reason?: string } | undefined;
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("persistence failure");
+    expect(result?.reason).toContain("audit writes");
+    // In-scope is no longer the point: nothing new reaches the target while
+    // the record cannot be kept.
+    expect(result?.reason).not.toContain("outside engagement scope");
+  });
+
+  test("local work keeps running — degraded, not dead", async () => {
+    const { handlers } = await buildDegraded();
+    const read = await handlers.get("tool_call")![0]!(
+      { toolName: "read", input: { path: "notes/report.md" } },
+      makeCtx(),
+    );
+    expect(read).toBeUndefined();
+    const write = await handlers.get("tool_call")![0]!(
+      { toolName: "write", input: { file_path: "/home/op/engagement/notes/report.md", content: "x" } },
+      makeCtx(),
+    );
+    expect(write).toBeUndefined();
+  });
+
+  test("evidence tools refuse with a typed storage code and record nothing", async () => {
+    const { evidence, tools } = await buildDegraded();
+    const before = evidence.observations.length;
+    for (const name of ["ardent_note", "ardent_finding", "ardent_verify", "ardent_link", "ardent_screenshot"]) {
+      const tool = tools.find((t) => t.name === name)!;
+      const result = (await tool.execute("call-x", {}, undefined, undefined, makeCtx())) as {
+        content: Array<{ text: string }>;
+        details: { ok?: boolean; code?: string };
+      };
+      expect(result.details.ok).toBe(false);
+      expect(result.details.code).toBe("storage_unavailable");
+      expect(result.content[0]!.text).toContain("Rejected: storage_unavailable");
+      expect(result.content[0]!.text).toContain("read-only");
+    }
+    // Read-only means read-only: not one new record entered memory either, so
+    // the count cannot drift from what the file holds by a second failure.
+    expect(evidence.observations.length).toBe(before);
+  });
+
+  test("the storage refusal is distinguishable from the no-engagement one", async () => {
+    const { tools } = await buildDegraded();
+    const note = tools.find((t) => t.name === "ardent_note")!;
+    const degraded = (await note.execute("call-x", { summary: "x" }, undefined, undefined, makeCtx())) as {
+      content: Array<{ text: string }>;
+      details: { code?: string };
+    };
+    expect(degraded.content[0]!.text).toMatch(/^Rejected: storage_unavailable/);
+    expect(degraded.details.code).toBe("storage_unavailable");
+
+    const idle = build(() => undefined);
+    await idle.handlers.get("session_start")![0]!({}, makeCtx());
+    const idleNote = idle.tools.find((t) => t.name === "ardent_note")!;
+    const outside = (await idleNote.execute("call-x", { summary: "x" }, undefined, undefined, makeCtx())) as {
+      content: Array<{ text: string }>;
+      details: { code?: string };
+    };
+    expect(outside.content[0]!.text).toMatch(/^Refused: /);
+    expect(outside.details.code).toBeUndefined();
+  });
+});

@@ -17,7 +17,7 @@ before relying on it.
 |---|---|
 | `src/ardent/types.ts` | Domain vocabulary: Observation, Hypothesis, Artifact, Verification, Finding, Confidence, WorkingMemory |
 | `src/ardent/scope.ts` | Scope parsing (IP/CIDR/host/wildcard/any), matching, target extraction |
-| `src/ardent/gate.ts` | Host-only action gate: destructive / privilege / out-of-scope / outside-workspace classification |
+| `src/ardent/gate.ts` | Host-only action gate: persistence-failure (read-only mode) / destructive / privilege / out-of-scope / outside-workspace classification |
 | `src/ardent/memory.ts` | Bounded working memory: facts, todos, artifact refs; render + prune |
 | `src/ardent/evidence.ts` | Append-only evidence store with ids, provenance, "no evidence → no finding", and the relations that form attack paths |
 | `src/ardent/prompt.ts` | The engagement brief injected before each turn |
@@ -64,6 +64,15 @@ gate is the boundary:
   shape — the call is blocked with `policy evaluation failed` rather than waved
   through. A failed assessment is not permission, and the reason says what
   actually happened instead of inventing a scope verdict.
+- **A failed durable evidence write stops target execution** (read-only mode).
+  The sticky `EvidenceStore.degraded` flag is passed into the gate as
+  `persistenceDegraded`, checked *before* any classification: every shell call
+  and every tool naming an outbound `url` is blocked for the rest of the run,
+  and the evidence tools themselves refuse with a typed `storage_unavailable`
+  so nothing enters a record that cannot be committed. Local read/write work
+  continues — an engagement that has lost its audit trail may still be read and
+  exported, but it may not act on a target. Recovery is a new run against a
+  working store (there is no rehydration path yet).
 - Findings must cite existing observation/artifact ids **and at least one of
   them**: an empty citation list is refused as `missing_citation`, a
   never-issued id as `foreign_reference`. Verification is recorded separately
@@ -614,8 +623,31 @@ Evidence writes are now under the same contract: `createJsonlEvidenceSink` no
 longer swallows errors, so a failed durable write sets
 `EvidenceStore.degraded` (with `persistenceError` saying why) instead of
 reporting success over a hole. The flag is deliberately sticky — a later
-successful write does not repair the record that went missing. Surfacing it in
-`/ardent` and the HUD is plan Phase 6's "durable-write status", not wired yet.
+successful write does not repair the record that went missing.
+
+Because it is sticky it is also **enforced**, not merely reported (read-only
+mode; the invariant "a required persistence/policy failure prohibits new
+target execution"):
+
+- `assessAction` checks it first (rule 0, `GateInput.persistenceDegraded`):
+  with a failed durable write every shell call and every tool naming an
+  outbound `url` is blocked for the rest of the run, with a reason that names
+  the storage failure instead of dressing it up as an out-of-scope verdict.
+- All five evidence tools then refuse with `Rejected: storage_unavailable — …`
+  and a typed `details.code`, so nothing new enters a record that cannot be
+  committed. The TUI row prints the code; it no longer says "no active
+  engagement" for a failure that had nothing to do with engagement.
+- Local read/write work and everything already committed stay usable, so the
+  operator can still read and export what survived — degraded, not dead.
+
+Recovery is a new run against a working store: there is still no rehydration
+path (below), so nothing can clear the flag honestly. The "preserve available
+output for explicit recovery/export" half of that invariant is only partly
+met — nothing is discarded (the failed records stay in memory for the life of
+the process), but there is **no export command yet**, so an operator cannot
+salvage them to a file. That is an open gap, not a covered one. Surfacing the
+flag in `/ardent` and the HUD is plan Phase 6's "durable-write status", not
+wired yet.
 
 **Not wired yet:** the extension still keeps config and evidence state in
 process. Plan slice P3 is what moves session binding and the evidence commands
@@ -637,9 +669,11 @@ onto this application service while keeping the external tool names stable.
   probe used a single long `sleep`.
 - Working memory and evidence are per-process; v1 does not yet reload a store
   across sessions. Engagements themselves are durable now (journal + replay,
-  see "Engagement ownership" above), and a failed evidence write is at least
-  *visible* via `EvidenceStore.degraded` — but the evidence records still have
-  no rehydration path, so the flag reports a hole nothing can yet fill.
+  see "Engagement ownership" above), and a failed evidence write is both
+  *visible* and *enforced* via `EvidenceStore.degraded` — read-only mode, see
+  *Safety model* above — but the evidence records still have no rehydration
+  path, so the flag reports a hole nothing can yet fill, and the only way out
+  of read-only mode is a new run.
 
 ## Phase 2 (in progress): plan → execute → verify, then subagents
 

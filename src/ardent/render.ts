@@ -422,6 +422,8 @@ export interface NoteDetailsLike {
     observation_id?: string;
     summary?: string;
     target?: string;
+    /** Typed refusal: `storage_unavailable` for read-only mode, etc. */
+    code?: string;
 }
 
 /**
@@ -435,12 +437,16 @@ export interface NoteDetailsLike {
  */
 export function noteResultLines(theme: ThemeLike, details: NoteDetailsLike | undefined, width: number): string[] {
     // Outside an engagement the tool refuses; the row must not claim "recorded".
+    // With a typed code the refusal has another cause — read-only mode after a
+    // failed durable write — and printing "no active engagement" for it would
+    // tell the operator something untrue about why their note vanished.
     if (details?.ok === false) {
+        const why = details?.code ? ` · ${details.code}` : " · no active engagement";
         return [
             row(theme, [
                 { text: `${GLYPH.verifyFail} `, color: "error" },
                 { text: "not recorded", color: "error" },
-                dim(" · no active engagement"),
+                dim(why),
             ], width),
         ];
     }

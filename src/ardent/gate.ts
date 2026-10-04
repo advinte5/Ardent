@@ -27,6 +27,11 @@ export interface GateInput {
   scope: Scope;
   /** Workspace root; writes resolving outside it are confirmed. */
   cwd: string;
+  /**
+   * True when a required audit write has failed (`EvidenceStore.degraded`).
+   * The engagement is then read-only: see rule 0 in `evaluateAction`.
+   */
+  persistenceDegraded?: boolean;
 }
 
 /** Commands that destroy data or the host, regardless of scope. */
@@ -61,6 +66,22 @@ function writtenPath(input: Record<string, unknown>): string | undefined {
     if (typeof value === "string" && value.trim() !== "") return value;
   }
   return undefined;
+}
+
+/**
+ * Destination fields on non-shell tools (the screenshot tool's `url`, and the
+ * equivalent on the HTTP adapter when it lands). `target` is deliberately NOT
+ * here: on the evidence tools it is metadata about what an observation is
+ * about, and it is recorded, not dialled — treating it as a destination would
+ * report "target execution" for a call that never reaches the network.
+ */
+function outboundDestinations(input: Record<string, unknown>): string[] {
+  const destinations: string[] = [];
+  for (const key of ["url", "uri"]) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim() !== "") destinations.push(value.trim());
+  }
+  return destinations;
 }
 
 function isOutsideCwd(targetPath: string, cwd: string): boolean {
@@ -112,6 +133,34 @@ function evaluateAction(input: GateInput): ActionAssessment {
     toolName === "bash" && typeof input.input.command === "string"
       ? (input.input.command as string)
       : "";
+
+  // 0. Persistence failure. The hard release invariant: a required audit
+  //    write that failed prohibits new target execution. If this engagement
+  //    cannot record what happened, it does not get to make more things
+  //    happen on a target — an action whose outcome cannot be committed is
+  //    indistinguishable from one that never ran, and evaluation case W16
+  //    requires the run to stop rather than to claim a durable success.
+  //
+  //    This runs before everything else on purpose: it is a precondition of
+  //    dispatch, not a classification of the action, and blocking on it is
+  //    never less strict than any verdict below. Local read/write work is
+  //    untouched — degraded, not dead.
+  if (input.persistenceDegraded) {
+    // What could reach out: the whole command for a shell (however it is
+    // worded), the named destination for anything else. Targets go back on
+    // the assessment so the audit line says what was stopped.
+    const text = toolName === "bash" ? command : outboundDestinations(input.input).join(" ");
+    const targets = extractTargets(text);
+    const reachesTarget = toolName === "bash" || targets.length > 0 || EGRESS_HINT_RE.test(text);
+    if (reachesTarget) {
+      return {
+        action: "block",
+        reason:
+          "persistence failure: audit writes are failing, so new target execution is prohibited until the store is durable again",
+        targets,
+      };
+    }
+  }
 
   // 1. Destructive, scope-independent.
   for (const { re, reason } of DESTRUCTIVE_PATTERNS) {

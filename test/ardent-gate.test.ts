@@ -96,3 +96,53 @@ describe("assessAction — sensitive actions", () => {
     expect(gate("write", { file_path: "notes/report.md" }).action).toBe("allow");
   });
 });
+
+describe("assessAction — persistence failure (read-only mode)", () => {
+  const degraded = (toolName: string, input: Record<string, unknown>) =>
+    assessAction({ toolName, input, scope, cwd, persistenceDegraded: true });
+
+  test("blocks shell execution while audit writes are failing, and names the targets", () => {
+    const a = degraded("bash", { command: "nmap 10.0.0.5" });
+    expect(a.action).toBe("block");
+    expect(a.reason).toContain("persistence failure");
+    expect(a.reason).toContain("audit writes");
+    expect(a.targets).toEqual(["10.0.0.5"]);
+  });
+
+  test("blocks even a local-looking shell: a shell is the execution vehicle", () => {
+    const a = degraded("bash", { command: "ls -la /tmp" });
+    expect(a.action).toBe("block");
+    expect(a.reason).toContain("persistence failure");
+    expect(a.targets).toEqual([]);
+  });
+
+  test("blocks a tool that names an outbound url", () => {
+    const a = degraded("ardent_screenshot", { url: "http://10.0.0.5/login" });
+    expect(a.action).toBe("block");
+    expect(a.targets).toEqual(["10.0.0.5"]);
+  });
+
+  test("still allows local read/write work — degraded, not dead", () => {
+    expect(degraded("read", { path: "notes.md" }).action).toBe("allow");
+    expect(degraded("write", { file_path: "/home/op/engagement/notes.md", content: "x" }).action).toBe("allow");
+    // `target` on a note is metadata about an observation, not a destination,
+    // so it must not be reported as target execution.
+    expect(degraded("ardent_note", { summary: "port 22 open", target: "10.0.0.5" }).action).toBe("allow");
+  });
+
+  test("stays inert when no engagement is configured", () => {
+    const a = assessAction({
+      toolName: "bash",
+      input: { command: "nmap 10.0.0.5" },
+      scope: parseScope([]),
+      cwd,
+      persistenceDegraded: true,
+    });
+    expect(a.action).toBe("allow");
+  });
+
+  test("without the flag the same calls keep their ordinary verdicts", () => {
+    expect(gate("bash", { command: "nmap 10.0.0.5" }).action).toBe("allow");
+    expect(gate("ardent_screenshot", { url: "http://10.0.0.5/login" }).action).toBe("allow");
+  });
+});
