@@ -12,8 +12,13 @@ import { W04Scenario } from "./W04";
 import { W05Scenario } from "./W05";
 import { W06Scenario } from "./W06";
 import { W07Scenario } from "./W07";
+import { W08Scenario } from "./W08";
+import { W09Scenario } from "./W09";
+import { W10Scenario } from "./W10";
+import { W11Scenario } from "./W11";
 import { W12Scenario } from "./W12";
 import { W13Scenario } from "./W13";
+import { W15Scenario } from "./W15";
 
 const ALL: readonly Scenario[] = [
   W03Scenario,
@@ -21,8 +26,13 @@ const ALL: readonly Scenario[] = [
   W05Scenario,
   W06Scenario,
   W07Scenario,
+  W08Scenario,
+  W09Scenario,
+  W10Scenario,
+  W11Scenario,
   W12Scenario,
   W13Scenario,
+  W15Scenario,
 ];
 
 /** Every implemented scenario, keyed by case id. */
