@@ -215,20 +215,32 @@ describe("ardent_finding rows", () => {
 });
 
 describe("ardent_verify rows", () => {
-  test("call shows finding and verdict", () => {
-    const [line] = verifyCallLines(plain, { finding_id: "find-1", passed: true, method: "reproduced" }, 200);
-    expect(line).toContain("✓ ardent_verify find-1 pass");
-    expect(line).toContain("reproduced");
+  test("the call row shows the experiment, never a verdict", () => {
+    // P5: the caller names a profile and two actions; no outcome exists yet, so
+    // there is deliberately no pass/fail mark on the call row.
+    const [line] = verifyCallLines(
+      plain,
+      {
+        finding_id: "find-1",
+        profile: "authorization-boundary",
+        probe_url: "http://x/objects/1",
+        control_url: "http://x/objects/1",
+      },
+      200,
+    );
+    expect(line).toContain("ardent_verify find-1");
+    expect(line).toContain("authorization-boundary");
+    expect(line).not.toContain("✓");
   });
 
   test("a pass reads as verified; a refutation is not an error", () => {
-    const pass = verifyResultLines(theme, { ok: true, verification_id: "ver-2", passed: true, finding_id: "find-3", method: "reproduced" }, "", 200);
+    const pass = verifyResultLines(theme, { ok: true, verification_id: "ver-2", outcome: "supported", finding_id: "find-3", method: "reproduced" }, "", 200);
     // The method is not echoed — the call row shows it.
     expect(stripTags(pass.join("\n"))).toContain("✓ verified ver-2 · find-3");
     expect(stripTags(pass.join("\n"))).not.toContain("reproduced");
     expect(pass.join("\n")).toContain("<success>");
 
-    const fail = verifyResultLines(theme, { ok: true, verification_id: "ver-3", passed: false, finding_id: "find-4", method: "no longer reproducible" }, "", 200);
+    const fail = verifyResultLines(theme, { ok: true, verification_id: "ver-3", outcome: "refuted", finding_id: "find-4", method: "no longer reproducible" }, "", 200);
     expect(stripTags(fail.join("\n"))).toContain("refuted");
     expect(fail.join("\n")).toContain("<warning>");
     expect(fail.join("\n")).not.toContain("<error>");
@@ -377,8 +389,8 @@ describe("no Ardent surface draws a box", () => {
     ["finding call", findingCallLines(plain, { title: "t", severity: "high", target: "1.1.1.1", description: "d", observation_ids: [] }, 80)],
     ["finding result", findingResultLines(plain, { ok: true, finding_id: "find-1", severity: "high", title: "t", target: "1.1.1.1", observation_count: 1 }, "", 80)],
     ["finding rejected", findingResultLines(plain, { ok: false }, "nope", 80)],
-    ["verify call", verifyCallLines(plain, { finding_id: "find-1", passed: true, method: "m" }, 80)],
-    ["verify result", verifyResultLines(plain, { ok: true, verification_id: "ver-1", passed: true }, "", 80)],
+    ["verify call", verifyCallLines(plain, { finding_id: "find-1", profile: "authorization-boundary", probe_url: "http://x/a", control_url: "http://x/a" }, 80)],
+    ["verify result", verifyResultLines(plain, { ok: true, verification_id: "ver-1", outcome: "supported" }, "", 80)],
     ["spawn call", spawnCallLines(plain, { task: "t" }, 80)],
     ["spawn result", spawnResultLines(plain, { ok: true, depth: 1 }, "out", 80, false)],
     ["screenshot call", screenshotCallLines(plain, { url: "http://x/", description: "d" }, 80)],

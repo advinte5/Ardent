@@ -8,6 +8,24 @@ import { describe, expect, test } from "bun:test";
 import { EvidenceStore } from "../src/ardent/evidence";
 import { linkCallLines, linkResultLines, type ThemeLike } from "../src/ardent/render";
 import { maxSeverity, severityRank, type Severity } from "../src/ardent/types";
+import { PROFILE_DIGESTS, type ProfileVerdict } from "../src/ardent/verification";
+
+/**
+ * A registered profile's verdict, exactly as `evaluateExperiment` produces one.
+ *
+ * P5 made a profile evaluation the ONLY thing that promotes a finding: a
+ * caller's `passed` boolean is not an input to the outcome any more, so a test
+ * that wants a link counted as verified has to record how it was judged.
+ */
+function verdict(outcome: ProfileVerdict["outcome"] = "supported"): ProfileVerdict {
+  return {
+    profileId: "authorization-boundary",
+    profileDigest: PROFILE_DIGESTS["authorization-boundary"],
+    outcome,
+    assertions: [],
+    reasons: [],
+  };
+}
 
 const plain: ThemeLike = { fg: (_c, t) => t, bold: (t) => t };
 const theme: ThemeLike = { fg: (color, t) => `<${color}>${t}</${color}>`, bold: (t) => t };
@@ -199,6 +217,7 @@ describe("attackPaths", () => {
       method: "repro",
       confidence: 0.9,
       proof: { observationIds: ["obs-1"] },
+      verdict: verdict(),
     });
     expect(store.attackPaths()[0]!.verifiedCount).toBe(1);
   });
@@ -242,6 +261,7 @@ describe("renderFindings", () => {
       method: "repro",
       confidence: 0.9,
       proof: { observationIds: ["obs-1"] },
+      verdict: verdict(),
     });
 
     const report = store.renderFindings();
@@ -260,6 +280,7 @@ describe("renderFindings", () => {
       method: "repro",
       confidence: 0.9,
       proof: { observationIds: ["obs-1"] },
+      verdict: verdict(),
     });
     expect(store.renderFindings()).not.toContain("attack path");
   });

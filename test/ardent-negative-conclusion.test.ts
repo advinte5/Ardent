@@ -19,6 +19,18 @@ import { describe, expect, test } from "bun:test";
 import { EvidenceStore, type EvidenceRecord } from "../src/ardent/evidence";
 import { findingAssertion, type Finding } from "../src/ardent/types";
 import { foldObservedOutcome, proofVerdict, type TrialEvidence } from "../eval/grader";
+import { PROFILE_DIGESTS, type ProfileVerdict } from "../src/ardent/verification";
+
+/** A registered profile's verdict, as `evaluateExperiment` produces one. */
+function verdict(outcome: ProfileVerdict["outcome"] = "supported"): ProfileVerdict {
+  return {
+    profileId: "authorization-boundary",
+    profileDigest: PROFILE_DIGESTS["authorization-boundary"],
+    outcome,
+    assertions: [],
+    reasons: [],
+  };
+}
 
 /** A store with one runtime-origin capture, so a verification can carry a verdict. */
 function storeWithCapture() {
@@ -51,6 +63,7 @@ function concludedWith(asserts: "present" | "absent" | undefined) {
     method: "captured refusal",
     confidence: 0.9,
     proof: { observationIds: [proofId] },
+    verdict: verdict(),
   });
   if (!verified.ok) throw new Error(`verification rejected: ${verified.error}`);
   return { store, finding: verified.finding, proofId };

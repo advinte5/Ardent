@@ -30,7 +30,7 @@ export type FindingStatus = "candidate" | "verified" | "refuted" | "inconclusive
  * nothing to back it" are different facts, and the report must not blur them
  * into one reassuring-sounding state.
  */
-export type VerificationOutcome = "supported" | "refuted" | "inconclusive" | "unvalidated";
+export type VerificationOutcome = "supported" | "refuted" | "inconclusive" | "unvalidated" | "claimed";
 
 /** Lifecycle of a Hypothesis as evidence accumulates. */
 export type HypothesisStatus = "open" | "confirmed" | "refuted";
@@ -158,6 +158,39 @@ export interface Verification {
    */
   proofIds: string[];
   notes?: string;
+  /**
+   * The registered proof profile that evaluated this attempt (P5). Present only
+   * when the APPLICATION decided the outcome; a record without it is a caller's
+   * claim and could never promote the finding.
+   */
+  profileId?: string;
+  /**
+   * The profile definition's sha256 at evaluation time. Recorded so a later
+   * profile change makes the assessment visibly stale rather than silently
+   * reusable.
+   */
+  profileDigest?: string;
+  /** The registered experiment this attempt executed. */
+  attemptId?: string;
+}
+
+/**
+ * A registered experiment: the bounded actions an attempt will run, and the
+ * profile that will judge it (P5).
+ *
+ * Registration is durable and happens BEFORE execution, so the actions a run
+ * claims to have performed are the actions it registered. The two exchanges are
+ * executed by the application through the bounded adapter; the caller supplies
+ * method/url/identity and nothing else.
+ */
+export interface ExperimentSpec {
+  id: string;
+  ts: number;
+  findingId: string;
+  profileId: string;
+  profileDigest: string;
+  probe: { method: string; url: string; identity?: string };
+  control: { method: string; url: string; identity?: string };
 }
 
 /**

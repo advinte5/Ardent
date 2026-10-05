@@ -119,13 +119,23 @@ export interface ScenarioRuntime {
     /** What the finding claims; absent means `present`. See FindingAssertion. */
     asserts?: "present" | "absent";
   }): Promise<string | undefined>;
+  /**
+   * Reproduce a candidate through a registered proof profile (P5).
+   *
+   * The runtime supplies the two ACTIONS and the profile id; the tool runs both
+   * exchanges itself and the application judges them. There is deliberately no
+   * `passed` here: a caller-supplied verdict is what P5 removed.
+   */
   verify(input: {
     findingId: string;
-    passed: boolean;
-    method: string;
-    proofIds: string[];
+    profile: string;
+    /** Establishes the baseline; runs FIRST. */
+    control: { method: string; url: string; identity?: string };
+    /** Tests the claim. */
+    probe: { method: string; url: string; identity?: string };
     confidence?: number;
-  }): Promise<{ outcome?: string; status?: string; code?: string } | undefined>;
+    notes?: string;
+  }): Promise<{ outcome?: string; status?: string; code?: string; attempt_id?: string } | undefined>;
   /** `session_start` + `/ardent start <objective>`; returns the engagement id. */
   bind(objective: string): Promise<string | undefined>;
   /** `session_shutdown`, then replay the durable evidence log. */
@@ -300,23 +310,49 @@ export function createScenarioRuntime(opts: ScenarioRuntimeOptions): ScenarioRun
   };
 
   const verify: ScenarioRuntime["verify"] = async (input) => {
+    // The tool runs both exchanges itself, so the gate has to be consulted for
+    // them here for the same reason `request` does it: the runtime's contract is
+    // that the gate is checked BEFORE every contact and can block it.
+    const sides: Array<["control" | "probe", { method: string; url: string; identity?: string }]> = [
+      ["control", input.control],
+      ["probe", input.probe],
+    ];
+    for (const [label, side] of sides) {
+      if (
+        !(await gateAndCount(`${label}:${input.profile}`, "ardent_verify", { method: side.method, url: side.url }, {
+          method: side.method,
+          url: side.url,
+          ...(side.identity === undefined ? {} : { identity: side.identity }),
+        }))
+      ) {
+        return undefined;
+      }
+    }
     counters.toolCalls += 1;
     const params: Record<string, unknown> = {
       finding_id: input.findingId,
-      passed: input.passed,
-      method: input.method,
-      proof_observation_ids: input.proofIds,
+      profile: input.profile,
+      control_method: input.control.method,
+      control_url: input.control.url,
+      probe_method: input.probe.method,
+      probe_url: input.probe.url,
     };
+    if (input.control.identity !== undefined) params.control_identity = input.control.identity;
+    if (input.probe.identity !== undefined) params.probe_identity = input.probe.identity;
     if (input.confidence !== undefined) params.confidence = input.confidence;
+    if (input.notes !== undefined) params.notes = input.notes;
     const out = (await toolOf(harness, "ardent_verify").execute(
       `${opts.trialId}-verify`,
       params,
       undefined,
       undefined,
       ctx,
-    )) as { details?: { outcome?: string; status?: string; code?: string } };
+    )) as { details?: { outcome?: string; status?: string; code?: string; attempt_id?: string } };
     record("evidence", {
       tool: "ardent_verify",
+      profile: input.profile,
+      probe: input.probe.url,
+      control: input.control.url,
       outcome: out.details?.outcome ?? null,
       status: out.details?.status ?? null,
       code: out.details?.code ?? null,

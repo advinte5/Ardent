@@ -1,9 +1,9 @@
 diff --git a/packages/cli/ARDENT.md b/packages/cli/ARDENT.md
 new file mode 100644
-index 0000000..edf0c52
+index 0000000..0a189bb
 --- /dev/null
 +++ b/packages/cli/ARDENT.md
-@@ -0,0 +1,950 @@
+@@ -0,0 +1,952 @@
 +# Ardent — engagement layer on free-pi
 +
 +Ardent is an evidence-first, offensive-security engagement layer built on the
@@ -93,58 +93,57 @@ index 0000000..edf0c52
 +- Findings must cite existing observation/artifact ids **and at least one of
 +  them**: an empty citation list is refused as `missing_citation`, a
 +  never-issued id as `foreign_reference`. Verification is recorded separately
-+  and only promotes when the attempt cites records the harness captured
-+  itself (`origin: "runtime"`), never on `passed: true` alone and never on a
-+  model-authored note. Nothing promotes in v1 because no execution path writes
-+  runtime-origin records yet — that is the HTTP adapter work. `/findings`
-+  exposes the prototype's verified dispositions, not a guarantee of
-+  exploitability.
++  and only promotes through a registered **proof profile**'s verdict: the
++  application runs the attempt's control and probe itself and judges the
++  captures, so neither a `passed` boolean, a model-authored note, nor a
++  caller-chosen citation can promote anything. `/findings` exposes the
++  prototype's verified dispositions, not a guarantee of exploitability.
 +
-+### Current verification gate: captured proof, not independently validated proof
++### Current verification gate: a registered proof profile, judged by the application
 +
-+`ardent_verify` takes `proof_observation_ids` / `proof_artifact_ids` alongside
-+`passed` and `method`. A verdict now requires proof the **harness** captured:
-+an observation recorded with `origin: "runtime"`, or a non-screenshot artifact
-+written by the capture path. Everything else — a model's note, a bare boolean,
-+a screenshot — records the attempt and moves nothing. **The store still does
-+not inspect source bytes, enforce a fresh reproduction or control, or validate
-+the cited claim.** Current behavior:
++`ardent_verify` takes the finding, a **profile id**, and two EXCHANGES — a
++`probe` and a `control` (method, url, optional identity). It carries **no
++`passed` field and no way to supply proof**: the tool registers the experiment,
++runs the control and then the probe through the bounded adapter as
++`origin: "runtime"` captures, and asks the application to judge them. The verdict
++is the profile's; the caller names actions and nothing else.
 +
-+| Proof cited | Claim | Recorded outcome | Finding status |
-+| --- | --- | --- | --- |
-+| none | `passed: true` | `unvalidated` | unchanged (still a candidate) |
-+| model-authored note | `passed: true` | `unvalidated` | unchanged |
-+| model-declared file artifact | `passed: true` | `unvalidated` | unchanged |
-+| runtime-captured record | `passed: true` | `supported` | `verified` |
-+| runtime-captured record | `passed: false` | `refuted` | `refuted` |
-+| runtime-captured record | `inconclusive: true` | `inconclusive` | `inconclusive` |
-+| screenshot-only | any | refused (`validation`) | unchanged |
++| What happened | Recorded outcome | Finding status |
++| --- | --- | --- |
++| profile ran, digest matches, boundary crossed (or not, per the claim) | `supported` | `verified` |
++| profile ran, digest matches, attempt refutes the claim | `refuted` | `refuted` |
++| profile ran but could not discriminate (no capture, failed setup, truncated bytes, unreachable/empty control) | `inconclusive` | `inconclusive` |
++| real capture, but no profile judged it | `claimed` | unchanged |
++| no capture at all | `unvalidated` | unchanged |
++| profile id unregistered, or its digest changed since | `inconclusive` (stale) | unchanged |
++| screenshot-only proof | refused (`validation`) | unchanged |
 +
-+**`ardent_request` is the path to the `verified` rows (P4).** It is the one
-+tool that records a `runtime`-origin observation: its exchange is captured by
-+the harness from bytes the harness received, so citing its id can support a
-+finding. `ardent_note`, a bare boolean and a screenshot still cannot — `origin`
-+defaults to `model` — so an attempt built only on those stays `unvalidated`. What
-+is still missing is a **fresh** reproduction with a control and an independent
-+proof profile: a `runtime` record says the harness captured *something*, not that
-+the capture discriminates the claim. Until P5, treat a `verified` finding as
-+proven to have occurred in a captured exchange, not as independently re-tested.
-+Treat `/findings` accordingly.
++`supported` and `refuted` are the only promotions, and the only route to them is
++a profile the investigator did not author whose definition still matches its
++recorded digest. Three are registered: `authorization-boundary`,
++`route-comparison` and `guarded-transition`. Each REQUIRES a control, and
++incompleteness is `inconclusive` — never a refutation. `claimed` names the
++real-but-unjuged case honestly: the bytes are real, but nothing has checked that
++they DISCRIMINATE the claim, which is exactly the question a profile answers.
 +
-+Replay re-derives each imported attempt under this same rule and never
-+upgrades a label, so a record written under weaker rules cannot come back as a
-+verdict. Ids survive, which is what keeps a resumed session's citations
-+resolving.
++**The gate closes the boolean hole but does not inspect source bytes itself.** It
++compares two captured exchanges under a fixed rule; it does not re-derive the
++claim's truth from the target's own semantics, and it is host-scoped. Treat a
++`verified` finding as "a registered profile judged a fresh control/probe pair as
++discriminating the claim", not as independently re-tested ground truth.
++`ardent_request` remains the recon path for a single captured exchange; it is no
++longer a route to `verified` on its own.
 +
-+The unvalidated attempt is still persisted — it happened, and the audit trail
-+should show it — but it reaches neither `/findings` nor the `Verify …` todo,
-+which stays open so a live lead is not buried behind a bare assertion.
++Replay re-derives each imported attempt under this same rule and never upgrades
++a label, so a record written under weaker rules cannot come back as a verdict,
++and a digest change downgrades an old assessment to `inconclusive`. Ids survive,
++which is what keeps a resumed session's citations resolving.
++
++The attempt that moved nothing is still persisted — it happened, and the audit
++trail should show it — but it reaches neither `/findings` nor the `Verify …`
++todo, which stays open so a live lead is not buried behind a bare assertion.
 +`inconclusive` is its own status throughout: a test that could not discriminate
 +is not a refutation, and the report says so.
-+
-+A `runtime`-origin record still only says the harness captured *something*.
-+It does not establish that the capture is a deterministic signal for the claim
-+it is cited against — that connection is what the P5 proof profile must add.
 +
 +Every refusal carries a typed code — `validation`, `missing_citation`,
 +`foreign_reference`, `not_found` — that survives into the tool result's
@@ -901,13 +900,15 @@ index 0000000..edf0c52
 +  everything target-capable or evidence-writing is refused with `cancelled`
 +  until an operator runs `/ardent start` or `/ardent bind` deliberately. This
 +  is a visible block, not a demonstration that switching is safe.
-+- **Promotion needs a captured exchange, not an assertion.** A verification
-+  only carries a verdict when it cites proof the harness captured itself
-+  (`origin: "runtime"` records, or a non-screenshot artifact written by the
-+  capture path). `ardent_request` now supplies such records, so a finding can
-+  reach `verified` — but only when the capture actually carries the signal. A
-+  note, a bare `passed: true` or a screenshot still records an unvalidated
-+  attempt, and a fresh independent reproduction with a control is still P5.
++- **Promotion needs a registered profile's verdict, not an assertion.** A
++  verification promotes only when a registered proof profile
++  (`authorization-boundary`, `route-comparison`, `guarded-transition`) judges a
++  fresh control/probe pair — both run and captured by the application — as
++  discriminating the claim. A `passed` boolean, a model-authored note and a
++  screenshot cannot promote anything, and an unregistered or changed profile
++  downgrades to `inconclusive`. The profile compares two captured exchanges; it
++  does not re-derive the claim's truth from the target's own semantics, and it
++  is host-scoped.
 +- **Ids are unique per engagement, not globally.** `obs-1` in two engagements
 +  names two records; a path carries the engagement id, and reports must too.
 +- **The P0 baseline is deterministic only.** No model or provider was involved,
@@ -933,13 +934,14 @@ index 0000000..edf0c52
 +   pinning checks in `test/ardent-evidence-ownership.test.ts`. Parallel workers
 +   are closed off by the lease (see "Concurrency"); pipelined serialized
 +   fan-out is the remaining opportunity.
-+3. **Execution — captured HTTP done (P4); proof profile next.** The bounded
-+   HTTP adapter, supplied identity references and captured exchanges are
-+   delivered: `ardent_request` records a runtime-origin exchange, and W01 is now
-+   graded `demonstrated`. Still missing is the fresh proof profile (experiment
-+   registration, a control, an independent reproduction) — that is P5. Network
-+   confinement/container execution is deferred beyond host-only v1; do not imply
-+   the current gate supplies it.
++3. **Execution — captured HTTP (P4) and the proof profile (P5) are in.** The
++   bounded HTTP adapter supplies captured exchanges, and `ardent_verify` now
++   registers an experiment, runs a control and a probe through that adapter, and
++   has the application judge them against a registered profile — a model boolean
++   is no longer a promotion path. Still missing: experiment registration as a
++   first-class workflow (it is written by `ardent_verify`, not yet a standalone
++   `ardent_experiment` command), and network confinement/container execution,
++   deferred beyond host-only v1 — do not imply the current gate supplies it.
 +4. **Long-term state — partly done.** Evidence and artifacts are per-engagement
 +   and replay on restart (`EngagementStore.evidenceFor`/`artifactsFor`). Still
 +   open: working-memory rehydration, an export/retest package, and a legacy-log
@@ -1336,10 +1338,10 @@ index 0000000..e964bee
 +await main();
 diff --git a/packages/cli/eval/driver.ts b/packages/cli/eval/driver.ts
 new file mode 100644
-index 0000000..439b30e
+index 0000000..9f39c21
 --- /dev/null
 +++ b/packages/cli/eval/driver.ts
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,500 @@
 +// Deterministic scenario driver (P0).
 +//
 +// This is the scripted stand-in for a model: it decides the same actions a
@@ -1762,27 +1764,41 @@ index 0000000..439b30e
 +      const findingId = findOut.details?.finding_id;
 +      if (findingId !== undefined) {
 +        toolCalls += 1;
++        // `authorization-boundary`: the owner (B) fetches its own object first —
++        // the control that makes the crossing a difference rather than an
++        // assumption — then A attempts the same object. Both exchanges are the
++        // tool's own captures, and the application judges the claim.
 +        const verifyOut = (await toolOf(harness, "ardent_verify").execute(
 +          `${opts.trialId}-verify`,
 +          {
 +            finding_id: findingId,
-+            passed: true,
-+            method: "reproduced the cross-account read; the exchange is a runtime-origin capture",
-+            proof_observation_ids: [proofId],
++            profile: "authorization-boundary",
++            control_method: "GET",
++            control_url: `${appOrigin}/objects/${protectedObject.id}`,
++            control_identity: "fixture-b",
++            probe_method: "GET",
++            probe_url: `${appOrigin}/objects/${protectedObject.id}`,
++            probe_identity: "fixture-a",
 +          },
 +          undefined,
 +          undefined,
 +          ctx,
-+        )) as { details?: { outcome?: string; status?: string; code?: string } };
++        )) as { details?: { outcome?: string; status?: string; code?: string; attempt_id?: string } };
 +        traceEntry("evidence", {
 +          tool: "ardent_verify",
++          profile: "authorization-boundary",
 +          outcome: verifyOut.details?.outcome ?? null,
 +          status: verifyOut.details?.status ?? null,
 +          code: verifyOut.details?.code ?? null,
 +        });
 +        if (verifyOut.details?.outcome === "unvalidated") {
 +          notes.push(
-+            "the verification attempt was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchange",
++            "the attempt was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchanges",
++          );
++        }
++        if (verifyOut.details?.outcome === "inconclusive") {
++          notes.push(
++            "the profile could not discriminate the claim, so this is inconclusive rather than demonstrated",
 +          );
 +        }
 +      }
@@ -3697,10 +3713,10 @@ index 0000000..898fc57
 +}
 diff --git a/packages/cli/eval/scenario-runtime.ts b/packages/cli/eval/scenario-runtime.ts
 new file mode 100644
-index 0000000..c9e010e
+index 0000000..d725f11
 --- /dev/null
 +++ b/packages/cli/eval/scenario-runtime.ts
-@@ -0,0 +1,377 @@
+@@ -0,0 +1,413 @@
 +// Shared scenario runtime (P0 completion).
 +//
 +// Every scenario needs the same plumbing: build the real Ardent harness, bind a
@@ -3822,13 +3838,23 @@ index 0000000..c9e010e
 +    /** What the finding claims; absent means `present`. See FindingAssertion. */
 +    asserts?: "present" | "absent";
 +  }): Promise<string | undefined>;
++  /**
++   * Reproduce a candidate through a registered proof profile (P5).
++   *
++   * The runtime supplies the two ACTIONS and the profile id; the tool runs both
++   * exchanges itself and the application judges them. There is deliberately no
++   * `passed` here: a caller-supplied verdict is what P5 removed.
++   */
 +  verify(input: {
 +    findingId: string;
-+    passed: boolean;
-+    method: string;
-+    proofIds: string[];
++    profile: string;
++    /** Establishes the baseline; runs FIRST. */
++    control: { method: string; url: string; identity?: string };
++    /** Tests the claim. */
++    probe: { method: string; url: string; identity?: string };
 +    confidence?: number;
-+  }): Promise<{ outcome?: string; status?: string; code?: string } | undefined>;
++    notes?: string;
++  }): Promise<{ outcome?: string; status?: string; code?: string; attempt_id?: string } | undefined>;
 +  /** `session_start` + `/ardent start <objective>`; returns the engagement id. */
 +  bind(objective: string): Promise<string | undefined>;
 +  /** `session_shutdown`, then replay the durable evidence log. */
@@ -4003,23 +4029,49 @@ index 0000000..c9e010e
 +  };
 +
 +  const verify: ScenarioRuntime["verify"] = async (input) => {
++    // The tool runs both exchanges itself, so the gate has to be consulted for
++    // them here for the same reason `request` does it: the runtime's contract is
++    // that the gate is checked BEFORE every contact and can block it.
++    const sides: Array<["control" | "probe", { method: string; url: string; identity?: string }]> = [
++      ["control", input.control],
++      ["probe", input.probe],
++    ];
++    for (const [label, side] of sides) {
++      if (
++        !(await gateAndCount(`${label}:${input.profile}`, "ardent_verify", { method: side.method, url: side.url }, {
++          method: side.method,
++          url: side.url,
++          ...(side.identity === undefined ? {} : { identity: side.identity }),
++        }))
++      ) {
++        return undefined;
++      }
++    }
 +    counters.toolCalls += 1;
 +    const params: Record<string, unknown> = {
 +      finding_id: input.findingId,
-+      passed: input.passed,
-+      method: input.method,
-+      proof_observation_ids: input.proofIds,
++      profile: input.profile,
++      control_method: input.control.method,
++      control_url: input.control.url,
++      probe_method: input.probe.method,
++      probe_url: input.probe.url,
 +    };
++    if (input.control.identity !== undefined) params.control_identity = input.control.identity;
++    if (input.probe.identity !== undefined) params.probe_identity = input.probe.identity;
 +    if (input.confidence !== undefined) params.confidence = input.confidence;
++    if (input.notes !== undefined) params.notes = input.notes;
 +    const out = (await toolOf(harness, "ardent_verify").execute(
 +      `${opts.trialId}-verify`,
 +      params,
 +      undefined,
 +      undefined,
 +      ctx,
-+    )) as { details?: { outcome?: string; status?: string; code?: string } };
++    )) as { details?: { outcome?: string; status?: string; code?: string; attempt_id?: string } };
 +    record("evidence", {
 +      tool: "ardent_verify",
++      profile: input.profile,
++      probe: input.probe.url,
++      control: input.control.url,
 +      outcome: out.details?.outcome ?? null,
 +      status: out.details?.status ?? null,
 +      code: out.details?.code ?? null,
@@ -6258,10 +6310,10 @@ index 0000000..afe659c
 +};
 diff --git a/packages/cli/eval/scenarios/W09.ts b/packages/cli/eval/scenarios/W09.ts
 new file mode 100644
-index 0000000..e26e872
+index 0000000..d066eb5
 --- /dev/null
 +++ b/packages/cli/eval/scenarios/W09.ts
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,487 @@
 +// W09 — "Workflow omission with protected state change".
 +//
 +// Hidden expectation: `demonstrated`. A multi-step workflow guards its final
@@ -6603,17 +6655,36 @@ index 0000000..e26e872
 +        observationIds: [proofId],
 +      });
 +      if (findingId !== undefined) {
++        // `guarded-transition`: a BASELINE read of the object runs first (it must
++        // be reached, and it is what makes the probe's new content a state change
++        // rather than a constant), then the guarded transition is attempted
++        // WITHOUT its prerequisite. Deliberately no prerequisite request: doing
++        // it would make the transition legitimate and the claim meaningless.
++        //
++        // The final route is idempotent in this fixture, so re-running it is a
++        // genuine fresh attempt rather than a replay of the earlier one.
 +        const verification = await rt.verify({
 +          findingId,
-+          passed: true,
-+          method:
-+            "replayed the omission: the captured exchange for the final transition returned 200 and carried " +
-+            "the protected marker, while no request for the required earlier step was ever made",
-+          proofIds: [proofId],
++          profile: "guarded-transition",
++          control: {
++            method: "GET",
++            url: `${input.target.appOrigin}/workflow/${truth.objectId}`,
++            identity: "fixture-a",
++          },
++          probe: {
++            method: "POST",
++            url: `${input.target.appOrigin}${truth.finalPath}`,
++            identity: "fixture-a",
++          },
 +        });
 +        if (verification?.outcome === "unvalidated") {
 +          rt.notes.push(
-+            "the verification was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchange",
++            "the attempt was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchanges",
++          );
++        }
++        if (verification?.outcome === "inconclusive") {
++          rt.notes.push(
++            "the profile could not discriminate the claim, so this is inconclusive rather than demonstrated",
 +          );
 +        }
 +      }
@@ -7208,10 +7279,10 @@ index 0000000..79e4ad4
 +};
 diff --git a/packages/cli/eval/scenarios/W11.ts b/packages/cli/eval/scenarios/W11.ts
 new file mode 100644
-index 0000000..dc40978
+index 0000000..734e9e5
 --- /dev/null
 +++ b/packages/cli/eval/scenarios/W11.ts
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,436 @@
 +// W11 — "Multi-feature path differs from expected route".
 +//
 +// Hidden expectation: `demonstrated`. The seeded target exposes the SAME scoped
@@ -7524,14 +7595,24 @@ index 0000000..dc40978
 +      });
 +
 +      if (findingId !== undefined) {
++        // `route-comparison`: the sanctioned route must be REFUSED (the control)
++        // and the alias must APPLY the effect (the probe). If both behaved the
++        // same there would be no defect, so the control is what makes the claim
++        // mean something — and the application, not the driver, reads that from
++        // its own captures.
 +        await rt.verify({
 +          findingId,
-+          passed: true,
-+          method:
-+            `Replayed the ${TARGET_STATE} transition on ${truth.objectId} through the undocumented alias ` +
-+            `${aliasPath(truth.objectId)} and captured the exchange end-to-end; the sanctioned route refuses ` +
-+            "the same request, so the reachability is the defect rather than the intended behaviour.",
-+          proofIds: [alias.observation_id],
++          profile: "route-comparison",
++          control: {
++            method: "POST",
++            url: `${input.target.appOrigin}${documentedPath(truth.objectId)}`,
++            ...(cookie === undefined ? {} : { identity: "fixture-a" }),
++          },
++          probe: {
++            method: "POST",
++            url: `${input.target.appOrigin}${aliasPath(truth.objectId)}`,
++            ...(cookie === undefined ? {} : { identity: "fixture-a" }),
++          },
 +        });
 +      }
 +    } else if (alias !== undefined) {
@@ -7974,10 +8055,10 @@ index 0000000..bde735c
 +};
 diff --git a/packages/cli/eval/scenarios/W13.ts b/packages/cli/eval/scenarios/W13.ts
 new file mode 100644
-index 0000000..a500085
+index 0000000..6476bc3
 --- /dev/null
 +++ b/packages/cli/eval/scenarios/W13.ts
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,315 @@
 +// W13 — "No demonstrated issue within budget".
 +//
 +// Hidden expectation: `no_finding`. The target carries no seeded issue and no
@@ -8056,8 +8137,9 @@ index 0000000..a500085
 +    const truth = input.target.truth() as FixtureTruth;
 +    const ownObject = truth.objects.find((o) => o.owner === "A");
 +    const accountA = truth.accounts.find((a) => a.owner === "A");
-+    if (ownObject === undefined || accountA === undefined) {
-+      throw new Error("fixture seed did not assign an A-owned object and an A-owned account");
++    const accountB = truth.accounts.find((a) => a.owner === "B");
++    if (ownObject === undefined || accountA === undefined || accountB === undefined) {
++      throw new Error("fixture seed did not assign an A-owned object and both accounts");
 +    }
 +
 +    await rt.bind(input.caseDef.objective);
@@ -8066,6 +8148,14 @@ index 0000000..a500085
 +      `${input.target.appOrigin}/login`,
 +      accountA.username,
 +      accountA.password,
++    );
++    // The control side of the reproduction runs as B: the owner. Without a
++    // session that CAN fetch the object, a refusal to A would prove nothing.
++    const cookieB = await rt.login(
++      "fixture-b",
++      `${input.target.appOrigin}/login`,
++      accountB.username,
++      accountB.password,
 +    );
 +
 +    if (cookieA !== undefined) {
@@ -8126,13 +8216,25 @@ index 0000000..a500085
 +            observationIds: [probe.observation_id],
 +            asserts: "absent",
 +          });
-+          if (conclusion !== undefined) {
++          if (conclusion !== undefined && cookieB !== undefined) {
++            // The reproduction the application runs: B fetches its own object
++            // first (establishing that the resource is real and reachable),
++            // then A attempts the same object. Both exchanges are the tool's own
++            // captures, so the negative conclusion rests on a difference rather
++            // than on an absence — and the profile, not the driver, decides.
 +            await rt.verify({
 +              findingId: conclusion,
-+              passed: true,
-+              method:
-+                "authorized cross-account object read attempted with account A's session; captured exchange shows the refusal",
-+              proofIds: [probe.observation_id],
++              profile: "authorization-boundary",
++              control: {
++                method: "GET",
++                url: `${input.target.appOrigin}/objects/${otherObject!.id}`,
++                identity: "fixture-b",
++              },
++              probe: {
++                method: "GET",
++                url: `${input.target.appOrigin}/objects/${otherObject!.id}`,
++                identity: "fixture-a",
++              },
 +              confidence: 0.9,
 +            });
 +          }
@@ -11086,10 +11188,10 @@ index 0000000..dec6841
 +}
 diff --git a/packages/cli/src/ardent/evidence.ts b/packages/cli/src/ardent/evidence.ts
 new file mode 100644
-index 0000000..b542270
+index 0000000..4ea792c
 --- /dev/null
 +++ b/packages/cli/src/ardent/evidence.ts
-@@ -0,0 +1,797 @@
+@@ -0,0 +1,899 @@
 +// Ardent evidence store. Append-only, id-assigned, with provenance on every
 +// record (who produced it, when, and — for artifacts — a content hash). This is
 +// the "every finding must link to concrete evidence" requirement from the
@@ -11120,6 +11222,7 @@ index 0000000..b542270
 +  Artifact,
 +  ArtifactKind,
 +  Confidence,
++  ExperimentSpec,
 +  Finding,
 +  FindingAssertion,
 +  FindingStatus,
@@ -11134,6 +11237,7 @@ index 0000000..b542270
 +  VerificationOutcome,
 +} from "./types";
 +import { findingAssertion, isRuntimeOrigin, maxSeverity } from "./types";
++import { isProofProfileId, PROFILE_DIGESTS, type ProfileVerdict } from "./verification";
 +
 +/** A maximal chain of `enables` edges, entry first. */
 +export interface AttackPath {
@@ -11184,7 +11288,8 @@ index 0000000..b542270
 +  | { kind: "artifact"; value: Artifact }
 +  | { kind: "verification"; value: Verification }
 +  | { kind: "finding"; value: Finding }
-+  | { kind: "relation"; value: Relation };
++  | { kind: "relation"; value: Relation }
++  | { kind: "experiment"; value: ExperimentSpec };
 +
 +const RECORD_KINDS: readonly EvidenceRecord["kind"][] = [
 +  "observation",
@@ -11193,6 +11298,7 @@ index 0000000..b542270
 +  "verification",
 +  "finding",
 +  "relation",
++  "experiment",
 +];
 +
 +/**
@@ -11234,18 +11340,45 @@ index 0000000..b542270
 + * from the harness does a supplied `passed`/`inconclusive` decide the verdict —
 + * and it still cannot upgrade an unvalidated claim.
 + */
-+export function deriveOutcome(input: {
++export function outcomeForVerification(input: {
 +  /** How many proof ids the attempt cited at all. */
 +  proofCount: number;
 +  /** True when at least one cited id is harness-captured proof. */
 +  hasRuntimeProof: boolean;
-+  passed: boolean;
-+  inconclusive?: boolean;
++  /**
++   * The registered profile that evaluated the attempt, when one did. Its
++   * presence is what makes an outcome a RESULT rather than a claim.
++   */
++  profileId?: string;
++  profileDigest?: string;
++  /** What the profile or the caller recorded, re-checked against the current rule. */
++  recordedOutcome?: VerificationOutcome;
 +}): VerificationOutcome {
-+  if (input.proofCount === 0) return "unvalidated";
-+  if (!input.hasRuntimeProof) return "unvalidated";
-+  if (input.inconclusive) return "inconclusive";
-+  return input.passed ? "supported" : "refuted";
++  // A citation is still required before anything is accepted as a result: an
++  // attempt with no harness capture, or with only model-authored citations,
++  // cannot carry a verdict even when a profile ran. The one exception is a
++  // profile attempt that could not produce a capture at all — it RAN and could
++  // not discriminate, which is `inconclusive`, not a bare assertion.
++  if (input.proofCount === 0 || !input.hasRuntimeProof) {
++    return input.profileId !== undefined && input.recordedOutcome === "inconclusive" ? "inconclusive" : "unvalidated";
++  }
++  if (input.profileId !== undefined) {
++    // A recorded assessment is re-evaluated under the profile that produced it,
++    // and only while that profile is still the registered version. A profile
++    // change makes the old assessment STALE — `inconclusive` — rather than
++    // silently reusable, which is what the digest is recorded for.
++    const profile = isProofProfileId(input.profileId) ? input.profileId : undefined;
++    if (profile === undefined || PROFILE_DIGESTS[profile] !== input.profileDigest) return "inconclusive";
++    if (input.recordedOutcome === "refuted") return "refuted";
++    if (input.recordedOutcome === "inconclusive") return "inconclusive";
++    return "supported";
++  }
++  // No profile: this is a caller's own claim about its own capture. The bytes
++  // are real, but nothing has checked that they DISCRIMINATE the claim, and
++  // nothing stopped the caller citing the very exchange it wants to prove. It
++  // is recorded as `claimed` and moves the finding nowhere.
++  if (input.recordedOutcome === "inconclusive") return "inconclusive";
++  return "claimed";
 +}
 +
 +/** Apply an outcome to a finding, leaving it untouched when nothing was proven. */
@@ -11253,7 +11386,8 @@ index 0000000..b542270
 +  if (outcome === "supported") finding.status = "verified";
 +  else if (outcome === "refuted") finding.status = "refuted";
 +  else if (outcome === "inconclusive") finding.status = "inconclusive";
-+  // `unvalidated` deliberately leaves `finding.status` untouched.
++  // `unvalidated` (no proof at all) and `claimed` (proof, but no profile judged
++  // it) both deliberately leave `finding.status` untouched: neither is a result.
 +}
 +
 +export class EvidenceStore {
@@ -11263,6 +11397,8 @@ index 0000000..b542270
 +  readonly verifications: Verification[] = [];
 +  readonly findings: Finding[] = [];
 +  readonly relations: Relation[] = [];
++  /** Registered experiments (P5). Durable: registration precedes execution. */
++  readonly experiments: ExperimentSpec[] = [];
 +
 +  private readonly persist?: EvidencePersist;
 +  private readonly now: () => number;
@@ -11440,11 +11576,22 @@ index 0000000..b542270
 +          }
 +          const proofObservationIds = record.value.proofIds.filter((id) => this.observations.some((o) => o.id === id));
 +          const proofArtifactIds = record.value.proofIds.filter((id) => this.artifacts.some((a) => a.id === id));
-+          const outcome = deriveOutcome({
++          // Re-derived under the CURRENT rule, so a label earned under a weaker
++          // one is not resurrected: a verification with no profile becomes
++          // `claimed`, and one whose profile has changed version becomes stale
++          // (`inconclusive`) rather than silently reusable.
++          const outcome = outcomeForVerification({
 +            proofCount: record.value.proofIds.length,
 +            hasRuntimeProof: this.#hasRuntimeProof(proofObservationIds, proofArtifactIds),
-+            passed: record.value.passed,
-+            ...(record.value.outcome === "inconclusive" ? { inconclusive: true } : {}),
++            ...(record.value.profileId === undefined
++              ? {}
++              : { profileId: record.value.profileId, profileDigest: record.value.profileDigest }),
++            recordedOutcome:
++              record.value.profileId !== undefined
++                ? record.value.outcome
++                : record.value.outcome === "inconclusive"
++                  ? "inconclusive"
++                  : undefined,
 +          });
 +          const value: Verification = { ...record.value, outcome, proofIds: [...record.value.proofIds] };
 +          this.verifications.push(value);
@@ -11622,19 +11769,56 @@ index 0000000..b542270
 +  }
 +
 +  /**
++   * Register a bounded experiment before it runs (P5).
++   *
++   * Registration is the durable half of "the actions a run says it performed
++   * are the actions it registered": the spec is committed first, so the record
++   * of intent cannot be edited after the fact to match whatever happened.
++   */
++  addExperiment(input: {
++    findingId: string;
++    profileId: string;
++    profileDigest: string;
++    probe: { method: string; url: string; identity?: string };
++    control: { method: string; url: string; identity?: string };
++  }): { ok: true; experiment: ExperimentSpec } | EvidenceRejection {
++    if (!this.findings.some((f) => f.id === input.findingId)) {
++      return reject("not_found", `unknown finding id: ${input.findingId}`);
++    }
++    const value: ExperimentSpec = {
++      id: this.nextId("exp"),
++      ts: this.now(),
++      findingId: input.findingId,
++      profileId: input.profileId,
++      profileDigest: input.profileDigest,
++      probe: { ...input.probe },
++      control: { ...input.control },
++    };
++    const failure = this.commit({ kind: "experiment", value });
++    if (failure !== undefined) return failure;
++    this.experiments.push(value);
++    return { ok: true, experiment: value };
++  }
++
++  /**
 +   * Record a verification and apply its outcome to the linked finding.
 +   *
-+   * The finding only moves when the attempt cites proof THE HARNESS CAPTURED.
-+   * `passed: true` plus prose — or plus a model-authored note — is a model's
-+   * say-so, not a result: it is recorded with outcome `unvalidated` and the
-+   * finding stays exactly where it was, which is what stops a worker promoting
-+   * its own candidate by asserting a boolean. A test that ran but could not
++   * The finding only moves when a REGISTERED PROOF PROFILE evaluated the
++   * attempt (`verdict`). A caller's own `passed` boolean is no longer an input
++   * to the outcome at all: with proof it records `claimed`, which moves nothing,
++   * because the bytes being real and the bytes DISCRIMINATING the claim are two
++   * different questions and only the profile answers the second. An attempt that
++   * cites no proof at all is `unvalidated`; one that ran but could not
 +   * discriminate is `inconclusive` — a real, reportable result that is
 +   * specifically not `refuted`.
 +   */
 +  addVerification(input: {
 +    findingId: string;
-+    passed: boolean;
++    /**
++     * The caller's own claim. Retained for history, and NO LONGER an input to
++     * the outcome: with proof it records `claimed` and promotes nothing.
++     */
++    passed?: boolean;
 +    method: string;
 +    confidence: Confidence;
 +    notes?: string;
@@ -11642,6 +11826,13 @@ index 0000000..b542270
 +    proof?: { observationIds?: string[]; artifactIds?: string[] };
 +    /** Set when the attempt ran but could not discriminate either way. */
 +    inconclusive?: boolean;
++    /**
++     * A registered profile's evaluation of this attempt. The ONLY route to
++     * `supported`, and therefore the only way a finding reaches `verified`.
++     */
++    verdict?: ProfileVerdict;
++    /** The experiment this attempt executed, when one was registered first. */
++    attemptId?: string;
 +  }):
 +    | { ok: true; verification: Verification; finding: Finding; promoted: boolean }
 +    | EvidenceRejection {
@@ -11670,23 +11861,36 @@ index 0000000..b542270
 +        "a screenshot alone cannot carry a verification; cite the captured signal (DOM state, console output, request/response) as proof",
 +      );
 +    }
-+    // The outcome is derived from provenance and proof, never from `passed`.
-+    const outcome = deriveOutcome({
++    // The outcome comes from the profile that evaluated the attempt, or from
++    // the mere fact that proof was cited — never from a caller's boolean.
++    const recordedOutcome =
++      input.verdict !== undefined
++        ? input.verdict.outcome
++        : input.inconclusive === true
++          ? "inconclusive"
++          : undefined;
++    const outcome = outcomeForVerification({
 +      proofCount: proofIds.length,
 +      hasRuntimeProof: this.#hasRuntimeProof(proofObservationIds, proofArtifactIds),
-+      passed: input.passed,
-+      ...(input.inconclusive === undefined ? {} : { inconclusive: input.inconclusive }),
++      ...(input.verdict === undefined
++        ? {}
++        : { profileId: input.verdict.profileId, profileDigest: input.verdict.profileDigest }),
++      ...(recordedOutcome === undefined ? {} : { recordedOutcome }),
 +    });
 +    const value: Verification = {
 +      id: this.nextId("ver"),
 +      ts: this.now(),
 +      findingId: finding.id,
-+      passed: input.passed,
++      passed: input.passed ?? outcome === "supported",
 +      method: input.method,
 +      confidence: clamp01(input.confidence),
 +      outcome,
 +      proofIds,
 +      ...(input.notes === undefined ? {} : { notes: input.notes }),
++      ...(input.verdict === undefined
++        ? {}
++        : { profileId: input.verdict.profileId, profileDigest: input.verdict.profileDigest }),
++      ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
 +    };
 +    const failure = this.commit({ kind: "verification", value });
 +    if (failure !== undefined) return failure;
@@ -11889,10 +12093,10 @@ index 0000000..b542270
 +}
 diff --git a/packages/cli/src/ardent/extension.ts b/packages/cli/src/ardent/extension.ts
 new file mode 100644
-index 0000000..bc7183e
+index 0000000..2e4056b
 --- /dev/null
 +++ b/packages/cli/src/ardent/extension.ts
-@@ -0,0 +1,2361 @@
+@@ -0,0 +1,2526 @@
 +// free-pi-ardent: the Ardent engagement extension (Phase 1 + subagents).
 +//
 +// Wires the pure modules into pi:
@@ -11928,7 +12132,15 @@ index 0000000..bc7183e
 +  VerificationOutcome,
 +  WorkingMemory,
 +} from "./types";
-+import { emptyWorkingMemory } from "./types";
++import { emptyWorkingMemory, findingAssertion } from "./types";
++import {
++  describeProfile,
++  evaluateExperiment,
++  isProofProfileId,
++  PROFILE_DIGESTS,
++  PROOF_PROFILE_IDS,
++  type CaptureEvidence,
++} from "./verification";
 +import {
 +  ARDENT_REQUEST_TOOL,
 +  ARDENT_SCREENSHOT_TOOL,
@@ -12202,26 +12414,32 @@ index 0000000..bc7183e
 +  ),
 +});
 +
++// P5: an attempt is a REGISTERED EXPERIMENT the application runs, judged by a
++// registered proof profile. There is deliberately no `passed` argument — a
++// caller-supplied verdict is exactly what this replaced, because the bytes a
++// caller captures being real and those bytes DISCRIMINATING the claim are two
++// different questions and only the profile answers the second.
 +const VERIFY_PARAMS = Type.Object({
-+  finding_id: Type.String({ description: "Finding id (find-N) to verify." }),
-+  passed: Type.Boolean({ description: "True if reproduced/confirmed." }),
-+  method: Type.String({ description: "How it was verified." }),
-+  proof_observation_ids: Type.Optional(
-+    Type.Array(Type.String(), {
++  finding_id: Type.String({ description: "Finding id (find-N) to reproduce." }),
++  profile: Type.Union(
++    PROOF_PROFILE_IDS.map((id) => Type.Literal(id)),
++    {
 +      description:
-+        "Observation ids (obs-N) carrying this result — the record of the test that ran. Without at least one proof id (or proof_artifact_ids) the attempt is recorded as unvalidated and the finding is NOT promoted.",
-+    }),
++        "The registered proof profile that will judge the attempt. Each profile names the control it requires; an unknown profile is refused rather than defaulted.",
++    },
 +  ),
-+  proof_artifact_ids: Type.Optional(
-+    Type.Array(Type.String(), {
-+      description: "Artifact ids (art-N) carrying this result, e.g. the captured exchange or screenshot.",
-+    }),
++  probe_method: Type.String({ description: "HTTP method for the probe — the action that tests the claim." }),
++  probe_url: Type.String({ description: "Absolute http(s) URL for the probe. Must be inside the engagement scope." }),
++  probe_identity: Type.Optional(
++    Type.String({ description: "Identity reference (e.g. an account name) to run the probe as. Never a credential." }),
 +  ),
-+  inconclusive: Type.Optional(
-+    Type.Boolean({
-+      description:
-+        "Set when the test actually ran but could not discriminate either way. Recorded as inconclusive — explicitly not a refutation.",
-+    }),
++  control_method: Type.String({
++    description:
++      "HTTP method for the control — the comparison exchange. Every profile requires one: a claim is a DIFFERENCE, and a single exchange cannot show one.",
++  }),
++  control_url: Type.String({ description: "Absolute http(s) URL for the control. Must be inside the engagement scope." }),
++  control_identity: Type.Optional(
++    Type.String({ description: "Identity reference to run the control as. Usually a different account than the probe." }),
 +  ),
 +  confidence: Type.Optional(Type.Number({ description: "0..1 confidence.", default: 0.8 })),
 +  notes: Type.Optional(Type.String({ description: "Optional details." })),
@@ -12344,7 +12562,13 @@ index 0000000..bc7183e
 +interface VerifyToolDetails {
 +  ok: boolean;
 +  verification_id?: string;
-+  passed?: boolean;
++  /** The registered experiment this attempt executed. */
++  attempt_id?: string;
++  /** Which registered profile judged it, and at which version. */
++  profile?: string;
++  profile_digest?: string;
++  /** One line per bounded assertion, so a refusal says which one was not met. */
++  assertions?: string;
 +  finding_id?: string;
 +  method?: string;
 +  /** What the attempt established — the verdict the store actually recorded. */
@@ -13297,13 +13521,14 @@ index 0000000..bc7183e
 +
 +      pi.registerTool<typeof VERIFY_PARAMS, VerifyToolDetails>({
 +        name: ARDENT_VERIFY_TOOL,
-+        label: "Record verification",
++        label: "Reproduce",
 +        description:
-+          "Record the outcome of testing a candidate finding, citing the evidence that carries the result. The finding only changes status when the attempt cites proof: a claim with no proof ids is recorded as unvalidated and does not promote. Only verified findings appear in the report.",
-+        promptSnippet: "Record the verification result for an Ardent finding",
++          "Reproduce a candidate through a registered proof profile and let the application judge it. You supply the two EXCHANGES and the profile; this tool runs both through the captured adapter itself, so the proof is the harness's own capture rather than a citation you chose. There is no way to assert a result: the profile decides, and it returns supported, refuted or inconclusive. Without a control that could have succeeded, the attempt is inconclusive rather than proven.",
++        promptSnippet: "Reproduce an Ardent finding through a registered proof profile",
 +        promptGuidelines: [
-+          "Cite the ids that carry the result in proof_observation_ids / proof_artifact_ids — that is what promotes the finding. `passed: true` alone records an unvalidated claim and leaves it a candidate.",
-+          "Use inconclusive: true when the test ran but could not discriminate; that is explicitly not a refutation.",
++          "Choose the profile by what your claim actually is; its requirements are enforced, not assumed.",
++          "Supply a CONTROL that would have come out differently if you were wrong. 'authorization-boundary' wants a control that fetches the SAME resource as an identity that IS entitled to it — without it, a refusal proves nothing and the attempt is inconclusive.",
++          "Both exchanges are run by the harness and captured as proof, so you cannot choose the evidence. If setup fails, is refused by scope, or the bytes are truncated, the attempt is inconclusive — which is not a refutation.",
 +        ],
 +        parameters: VERIFY_PARAMS,
 +        renderCall(args, theme) {
@@ -13315,20 +13540,155 @@ index 0000000..bc7183e
 +            verifyResultLines(theme, result.details, text, width),
 +          );
 +        },
-+        async execute(_toolCallId, params) {
++        async execute(_toolCallId, params, signal) {
 +          const refused = evidenceCommandRefusal();
 +          if (refused) return refused;
++
++          const candidate = evidenceNow().findings.find((f) => f.id === params.finding_id);
++          if (candidate === undefined) {
++            return {
++              content: [{ type: "text" as const, text: `Rejected: unknown finding id: ${params.finding_id}` }],
++              details: { ok: false, code: "not_found", error: `unknown finding id: ${params.finding_id}` },
++            };
++          }
++          if (candidate.status === "verified" || candidate.status === "refuted") {
++            return {
++              content: [
++                {
++                  type: "text" as const,
++                  text: `Rejected: ${candidate.id} already reached ${candidate.status}; a settled finding is not re-verified in place.`,
++                },
++              ],
++              details: { ok: false, code: "validation", error: `already ${candidate.status}` },
++            };
++          }
++          if (!isProofProfileId(params.profile)) {
++            return {
++              content: [
++                {
++                  type: "text" as const,
++                  text: `Rejected: unknown proof profile ${String(params.profile)}. Known: ${PROOF_PROFILE_IDS.join(", ")}.`,
++                },
++              ],
++              details: { ok: false, code: "validation", error: "unknown proof profile" },
++            };
++          }
++          const profileId = params.profile;
++          const profile = describeProfile(profileId);
++
++          // Register the intent BEFORE running anything, so the actions this
++          // attempt claims to have performed are the actions it registered.
++          const registered = evidenceNow().addExperiment({
++            findingId: candidate.id,
++            profileId,
++            profileDigest: PROFILE_DIGESTS[profileId],
++            probe: {
++              method: params.probe_method,
++              url: params.probe_url,
++              ...(params.probe_identity === undefined ? {} : { identity: params.probe_identity }),
++            },
++            control: {
++              method: params.control_method,
++              url: params.control_url,
++              ...(params.control_identity === undefined ? {} : { identity: params.control_identity }),
++            },
++          });
++          if (!registered.ok) {
++            if (registered.code === "storage_unavailable") return storageFailure(registered.error);
++            return {
++              content: [{ type: "text" as const, text: `Rejected: ${registered.error}` }],
++              details: { ok: false, code: registered.code, error: registered.error },
++            };
++          }
++
++          // Authority stays in the adapter: the caller names actions and an
++          // identity reference, never a verdict. Redirects are denied outright —
++          // an experiment's two exchanges are the experiment.
++          const bound = resolveEngagement();
++          const scope = bound.kind === "bound" ? bound.engagement.scope : state.config!.scope;
++          const identities = currentIdentities();
++          const isOriginAllowed = (origin: string): boolean => {
++            try {
++              return isInScope(new URL(origin).hostname, scope);
++            } catch {
++              return false;
++            }
++          };
++          const limits = { maxRedirects: HTTP_MAX_REDIRECTS, timeoutMs: HTTP_TIMEOUT_MS, maxBytes: HTTP_MAX_BYTES };
++
++          const runSide = async (
++            side: { method: string; url: string; identity?: string },
++          ): Promise<{ capture: CaptureEvidence; storeFailure?: string }> => {
++            const exchange = await executeHttpRequest({
++              spec: {
++                method: side.method,
++                url: side.url,
++                ...(side.identity === undefined ? {} : { identity: side.identity }),
++                redirect: "deny",
++              },
++              limits,
++              isOriginAllowed,
++              ...(identities === undefined ? {} : { resolveIdentity: identities }),
++              ...(signal === undefined ? {} : { signal }),
++            });
++            if (!exchange.ok) {
++              return { capture: { ok: false, ...(exchange.code === undefined ? {} : { code: exchange.code }) } };
++            }
++            let host = "";
++            try {
++              host = new URL(exchange.finalUrl ?? side.url).hostname;
++            } catch {
++              host = "";
++            }
++            const summary =
++              `[${profileId}] ${exchange.request.method} ${exchange.request.url} -> ${exchange.finalStatus}` +
++              (exchange.truncated ? " (body truncated)" : "");
++            const recorded = evidenceNow().addObservation({
++              source: ARDENT_VERIFY_TOOL,
++              summary,
++              target: host,
++              origin: "runtime",
++              ...(exchange.body === undefined || exchange.body === ""
++                ? {}
++                : { raw: exchange.body.slice(0, HTTP_RAW_CAPTURE_BYTES) }),
++            });
++            const capture: CaptureEvidence = {
++              ok: true,
++              ...(exchange.finalStatus === undefined ? {} : { status: exchange.finalStatus }),
++              ...(exchange.body === undefined ? {} : { body: exchange.body }),
++              truncated: exchange.truncated,
++              ...(recorded.ok ? { observationId: recorded.observation.id } : {}),
++            };
++            return recorded.ok ? { capture } : { capture, storeFailure: recorded.error };
++          };
++
++          // CONTROL FIRST. A control establishes the baseline a claim is
++          // measured against, so running the probe first would let the probe's
++          // own effect contaminate the comparison — fatal for a state-change
++          // claim, and merely wasteful for the read-only ones.
++          const control = await runSide(registered.experiment.control);
++          const probe = await runSide(registered.experiment.probe);
++          const storeFailure = probe.storeFailure ?? control.storeFailure;
++          if (storeFailure !== undefined) return storageFailure(storeFailure);
++
++          // The application evaluates. The model supplied the exchanges and the
++          // profile id; it supplied no assertion, threshold or verdict.
++          const verdict = evaluateExperiment({
++            profileId,
++            attempt: { probe: probe.capture, control: control.capture },
++            claim: findingAssertion(candidate),
++          });
++          const proofObservationIds = [probe.capture.observationId, control.capture.observationId].filter(
++            (id): id is string => id !== undefined,
++          );
 +          const result = evidenceNow().addVerification({
-+            findingId: params.finding_id,
-+            passed: params.passed,
-+            method: params.method,
++            findingId: candidate.id,
++            method: `profile ${profileId} v${profile.version}`,
 +            confidence: (params.confidence ?? 0.8) as Confidence,
 +            ...(params.notes === undefined ? {} : { notes: params.notes }),
-+            proof: {
-+              ...(params.proof_observation_ids === undefined ? {} : { observationIds: params.proof_observation_ids }),
-+              ...(params.proof_artifact_ids === undefined ? {} : { artifactIds: params.proof_artifact_ids }),
-+            },
-+            ...(params.inconclusive === undefined ? {} : { inconclusive: params.inconclusive }),
++            proof: { observationIds: proofObservationIds },
++            verdict,
++            attemptId: registered.experiment.id,
 +          });
 +          if (!result.ok) {
 +            if (result.code === "storage_unavailable") return storageFailure(result.error);
@@ -13337,33 +13697,42 @@ index 0000000..bc7183e
 +              details: { ok: false, code: result.code, error: result.error },
 +            };
 +          }
-+          const finding = result.finding;
++
++          const settled = result.finding;
 +          // The "Verify find-N" todo is only finished once the finding reached
-+          // a verdict. An unvalidated or inconclusive attempt leaves the work
-+          // open: closing it would bury a live lead behind a bare claim.
-+          if (finding.status === "verified" || finding.status === "refuted") {
-+            completeTodo(state.memory, `Verify ${finding.id}: ${finding.title}`);
++          // a verdict. A claimed or inconclusive attempt leaves the work open:
++          // closing it would bury a live lead behind a bare claim.
++          if (settled.status === "verified" || settled.status === "refuted") {
++            completeTodo(state.memory, `Verify ${settled.id}: ${settled.title}`);
 +          }
 +          pi.appendEntry("ardent-memory", state.memory);
 +          refreshHud();
++
 +          const outcome = result.verification.outcome;
-+          const verdict = outcome === "supported" ? "verified" : outcome;
-+          const text =
-+            outcome === "unvalidated"
-+              ? `${result.verification.id} recorded: unvalidated — the attempt cites no harness-captured proof, so ${finding.id} remains ${finding.status}. ` +
-+                "A model-authored note or a bare passed: true cannot verify anything; the proof has to be a record the execution path captured."
-+              : `${result.verification.id}: ${verdict} (${params.method}) → ${finding.id} is now ${finding.status}.`;
++          const lines = [
++            `${result.verification.id}: ${outcome} — profile "${profile.title}" (${profileId} v${profile.version}) → ${settled.id} is now ${settled.status}.`,
++          ];
++          for (const assertion of verdict.assertions) {
++            lines.push(`  ${assertion.passed ? "ok" : "NOT MET"} ${assertion.id}: ${assertion.detail}`);
++          }
++          for (const reason of verdict.reasons) lines.push(`  ${reason}`);
++          if (outcome === "inconclusive") {
++            lines.push(`  inconclusive is not a refutation. This profile requires: ${profile.requires}`);
++          }
 +          return {
-+            content: [{ type: "text" as const, text }],
++            content: [{ type: "text" as const, text: lines.join("\n") }],
 +            details: {
 +              ok: true,
 +              verification_id: result.verification.id,
-+              passed: params.passed,
++              attempt_id: registered.experiment.id,
++              profile: profileId,
++              profile_digest: verdict.profileDigest,
 +              outcome,
 +              promoted: result.promoted,
-+              status: finding.status,
-+              finding_id: params.finding_id,
-+              method: params.method,
++              status: settled.status,
++              finding_id: candidate.id,
++              method: `profile ${profileId} v${profile.version}`,
++              assertions: verdict.assertions.map((a) => `${a.passed ? "ok" : "fail"}:${a.id}`).join(" "),
 +            },
 +          };
 +        },
@@ -16695,10 +17064,10 @@ index 0000000..4d31f8e
 +}
 diff --git a/packages/cli/src/ardent/render.ts b/packages/cli/src/ardent/render.ts
 new file mode 100644
-index 0000000..cec3639
+index 0000000..8d59628
 --- /dev/null
 +++ b/packages/cli/src/ardent/render.ts
-@@ -0,0 +1,853 @@
+@@ -0,0 +1,869 @@
 +// Ardent TUI rendering: how the Ardent surfaces read in the terminal.
 +//
 +// Visual language: no boxes. Every Ardent surface is a compact, indented strip
@@ -17222,19 +17591,29 @@ index 0000000..cec3639
 +
 +export interface VerifyCallArgs {
 +    finding_id: string;
-+    passed: boolean;
-+    method: string;
++    /** The registered profile that will judge the attempt (P5). */
++    profile: string;
++    probe_url: string;
++    control_url: string;
 +}
 +
++/**
++ * The call row shows the EXPERIMENT, not a result: the caller names a profile and
++ * two actions, and the outcome does not exist yet. There is deliberately no
++ * pass/fail glyph here — a mark on the call row would be the model's own claim
++ * rendered as a verdict, which is what P5 removed.
++ */
 +export function verifyCallLines(theme: ThemeLike, args: VerifyCallArgs, width: number): string[] {
 +    const spans: Span[] = [
-+        { text: `${args.passed ? GLYPH.verifyPass : GLYPH.verifyFail} `, color: args.passed ? "success" : "warning" },
++        { text: `${GLYPH.live} `, color: "accent" },
 +        { text: "ardent_verify", color: "toolTitle", bold: true },
 +    ];
 +    if (args.finding_id) spans.push({ text: ` ${args.finding_id}`, color: "accent" });
-+    spans.push(args.passed ? { text: " pass", color: "success" } : { text: " fail", color: "warning" });
-+    const method = oneLine(args.method);
-+    if (method) spans.push(dim(` ${method}`));
++    if (args.profile) spans.push(dim(` ${args.profile}`));
++    const probe = oneLine(args.probe_url);
++    const control = oneLine(args.control_url);
++    if (probe) spans.push(dim(` probe ${probe}`));
++    if (control) spans.push(dim(` control ${control}`));
 +    return [row(theme, spans, width)];
 +}
 +
@@ -17242,6 +17621,10 @@ index 0000000..cec3639
 +    ok?: boolean;
 +    verification_id?: string;
 +    passed?: boolean;
++    /** The registered experiment this attempt executed (P5). */
++    attempt_id?: string;
++    /** Which registered profile judged it. */
++    profile?: string;
 +    finding_id?: string;
 +    method?: string;
 +    /** What the attempt actually established — see VerificationOutcome. */
@@ -17274,7 +17657,9 @@ index 0000000..cec3639
 +                ? { text: "refuted", color: "warning", glyph: GLYPH.verifyFail }
 +                : outcome === "inconclusive"
 +                    ? { text: "inconclusive", color: "warning", glyph: GLYPH.verifyFail }
-+                    : { text: "unvalidated", color: "warning", glyph: GLYPH.verifyFail };
++                    : outcome === "claimed"
++                        ? { text: "claimed — not evaluated", color: "warning", glyph: GLYPH.verifyFail }
++                        : { text: "unvalidated", color: "warning", glyph: GLYPH.verifyFail };
 +    const head: Span[] = [{ text: verdict.text, color: verdict.color, bold: true }];
 +    if (details?.verification_id) head.push({ text: ` ${details.verification_id}`, color: "accent" });
 +    // The method is NOT repeated — the call row shows it, and it can be long
@@ -19071,10 +19456,10 @@ index 0000000..ebc07bd
 +}
 diff --git a/packages/cli/src/ardent/types.ts b/packages/cli/src/ardent/types.ts
 new file mode 100644
-index 0000000..29c0ae6
+index 0000000..bbc7b34
 --- /dev/null
 +++ b/packages/cli/src/ardent/types.ts
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,414 @@
 +// Ardent domain vocabulary (Phase 1). These are the report's evidence-model
 +// primitives — Observation, Hypothesis, Artifact, Verification, Finding,
 +// Confidence — plus the working-memory shape they feed. Pure types only: no
@@ -19107,7 +19492,7 @@ index 0000000..29c0ae6
 + * nothing to back it" are different facts, and the report must not blur them
 + * into one reassuring-sounding state.
 + */
-+export type VerificationOutcome = "supported" | "refuted" | "inconclusive" | "unvalidated";
++export type VerificationOutcome = "supported" | "refuted" | "inconclusive" | "unvalidated" | "claimed";
 +
 +/** Lifecycle of a Hypothesis as evidence accumulates. */
 +export type HypothesisStatus = "open" | "confirmed" | "refuted";
@@ -19235,6 +19620,39 @@ index 0000000..29c0ae6
 +   */
 +  proofIds: string[];
 +  notes?: string;
++  /**
++   * The registered proof profile that evaluated this attempt (P5). Present only
++   * when the APPLICATION decided the outcome; a record without it is a caller's
++   * claim and could never promote the finding.
++   */
++  profileId?: string;
++  /**
++   * The profile definition's sha256 at evaluation time. Recorded so a later
++   * profile change makes the assessment visibly stale rather than silently
++   * reusable.
++   */
++  profileDigest?: string;
++  /** The registered experiment this attempt executed. */
++  attemptId?: string;
++}
++
++/**
++ * A registered experiment: the bounded actions an attempt will run, and the
++ * profile that will judge it (P5).
++ *
++ * Registration is durable and happens BEFORE execution, so the actions a run
++ * claims to have performed are the actions it registered. The two exchanges are
++ * executed by the application through the bounded adapter; the caller supplies
++ * method/url/identity and nothing else.
++ */
++export interface ExperimentSpec {
++  id: string;
++  ts: number;
++  findingId: string;
++  profileId: string;
++  profileDigest: string;
++  probe: { method: string; url: string; identity?: string };
++  control: { method: string; url: string; identity?: string };
 +}
 +
 +/**
@@ -19458,10 +19876,10 @@ index 0000000..29c0ae6
 +}
 diff --git a/packages/cli/src/ardent/verification.ts b/packages/cli/src/ardent/verification.ts
 new file mode 100644
-index 0000000..7230f18
+index 0000000..2f5d838
 --- /dev/null
 +++ b/packages/cli/src/ardent/verification.ts
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,434 @@
 +// Ardent verification: registered proof profiles (plan slice P5).
 +//
 +// Before this module, a finding was promoted by a MODEL BOOLEAN. `ardent_verify`
@@ -19483,10 +19901,13 @@ index 0000000..7230f18
 +//
 +// Three properties are load-bearing, and each is a refusal rather than a score:
 +//
-+//   • A CONTROL IS REQUIRED. A denial proves nothing on its own — 404 is also
-+//     what a typo returns. Every profile here needs a second exchange showing
-+//     the thing under test is real and reachable, so that the probe's outcome
-+//     is a difference rather than an absence.
++//   • A CONTROL IS REQUIRED, AND IT RUNS FIRST. A denial proves nothing on its
++//     own — 404 is also what a typo returns. Every profile here needs a second
++//     exchange showing the thing under test is real and reachable, so that the
++//     probe's outcome is a difference rather than an absence. The ORDER is part
++//     of the contract: the control establishes the baseline, and running the
++//     probe first would let the probe's own effect contaminate it — which would
++//     make a state-change claim unfalsifiable rather than merely unproven.
 +//   • INCOMPLETE IS `inconclusive`, NEVER `refuted`. A missing capture, a
 +//     truncated body, an unreachable control or an ambiguous one cannot refute
 +//     a claim; they mean the attempt could not discriminate. Reporting that as
@@ -19780,7 +20201,7 @@ index 0000000..7230f18
 +    version: 1,
 +    title: "A guarded state transition completes without its prerequisite",
 +    requires:
-+      "A probe that attempts the guarded transition without the required prerequisite, and a control that performs the required prerequisite itself. The control must SUCCEED — it establishes the workflow is live and gives the pre-transition baseline that makes the probe's new content a state change rather than a constant.",
++      "A probe that attempts the guarded transition WITHOUT the required prerequisite, and a control READ of the same resource that runs first. The control must be reached, and it is what makes the probe's new content a state change rather than a constant: if the baseline already carried the state the probe claims to reach, the transition changed nothing. Do not satisfy the prerequisite to build the control — that would make the probe legitimate.",
 +    evaluate: (attempt, claim) => {
 +      const assertions: AssertionResult[] = [];
 +      const reasons: string[] = [];
@@ -19793,11 +20214,11 @@ index 0000000..7230f18
 +      const probeReached = probeCaptured && reached(attempt.probe.status);
 +
 +      assertions.push({
-+        id: "control.prerequisite_accepted",
++        id: "control.baseline_reached",
 +        passed: controlReached,
 +        detail: controlReached
-+          ? `the required prerequisite was accepted with HTTP ${attempt.control.status}, so the workflow is live and this is its pre-transition baseline`
-+          : `the required prerequisite was not accepted (HTTP ${attempt.control.status ?? "no response"}), so the workflow was never exercised and a later transition proves nothing`,
++          ? `the baseline read reached the resource with HTTP ${attempt.control.status}, so it is live and its content is the pre-transition comparison`
++          : `the baseline read did not reach the resource (HTTP ${attempt.control.status ?? "no response"}), so a later transition has nothing to be a change FROM`,
 +      });
 +      assertions.push({
 +        id: "probe.transition_completed",
@@ -19815,18 +20236,18 @@ index 0000000..7230f18
 +      const newContent =
 +        probeCaptured && controlReached ? tokenOnlyIn(attempt.probe.body, attempt.control.body) : undefined;
 +      assertions.push({
-+        id: "probe.introduced_state_the_prerequisite_did_not",
++        id: "probe.introduced_state_the_baseline_did_not",
 +        passed: newContent !== undefined,
 +        detail:
 +          newContent === undefined
-+            ? "the guarded transition introduced no distinctive content the prerequisite had not already returned, so no state change is shown"
-+            : `the guarded transition introduced distinctive content (${newContent.slice(0, 12)}…) absent from the prerequisite response, so it changed state the prerequisite did not`,
++            ? "the guarded transition introduced no distinctive content the baseline read had not already returned, so no state change is shown"
++            : `the guarded transition introduced distinctive content (${newContent.slice(0, 12)}…) absent from the baseline, so it reached state the baseline did not`,
 +      });
 +
 +      const complete = probeCaptured && controlReached;
 +      const violated = probeReached && newContent !== undefined;
 +      if (!complete) {
-+        reasons.push("the prerequisite control did not run cleanly");
++        reasons.push("the baseline control did not run cleanly");
 +        reasons.push("inconclusive: the attempt could not discriminate the claim");
 +        return { outcome: "inconclusive", assertions, reasons };
 +      }
@@ -22406,10 +22827,10 @@ index 0000000..2c71cec
 +});
 diff --git a/packages/cli/test/ardent-evidence-ownership.test.ts b/packages/cli/test/ardent-evidence-ownership.test.ts
 new file mode 100644
-index 0000000..f9f4598
+index 0000000..368fe47
 --- /dev/null
 +++ b/packages/cli/test/ardent-evidence-ownership.test.ts
-@@ -0,0 +1,583 @@
+@@ -0,0 +1,591 @@
 +// Acceptance tests for the "finish evidence ownership" checkpoint
 +// (ARDENT-ENGAGEMENT-PLAN.md): evidence is owned by the bound engagement, is
 +// durable before it is projected, cannot be promoted by model prose, and an
@@ -22809,7 +23230,7 @@ index 0000000..f9f4598
 +});
 +
 +describe("checkpoint 4 — model prose cannot verify anything", () => {
-+  test("a cited note plus passed:true stays an unvalidated claim in the report", async () => {
++  test("a model's assertion is not an input: an attempt the harness cannot capture is inconclusive, never verified", async () => {
 +    const engagementsDir = freshEngagementsDir();
 +    const harness = build({ engagementsDir });
 +    const ctx = makeCtx("sess-1");
@@ -22837,26 +23258,34 @@ index 0000000..f9f4598
 +      ctx,
 +    )) as { details: { finding_id: string } };
 +
-+    const verified = (await tool(harness, "ardent_verify").execute(
++    // P5: the model supplies the exchanges and the profile, and NO verdict.
++    // Even naming the claim's own note and asserting `passed` changes nothing —
++    // the tool reads neither, and the two exchanges it runs are refused by
++    // scope, so the harness captures nothing to judge. An attempt that ran and
++    // could not discriminate is `inconclusive`, never a promotion.
++    const attempted = (await tool(harness, "ardent_verify").execute(
 +      "c3",
 +      {
 +        finding_id: created.details.finding_id,
++        profile: "authorization-boundary",
++        probe_method: "GET",
++        probe_url: "http://192.0.2.10/admin",
++        control_method: "GET",
++        control_url: "http://192.0.2.10/admin",
 +        passed: true,
-+        method: "reproduced it myself",
-+        proof_observation_ids: [noted.details.observation_id],
 +      },
 +      undefined,
 +      undefined,
 +      ctx,
 +    )) as { content: Array<{ text: string }>; details: { outcome?: string; promoted?: boolean; status?: string } };
-+    expect(verified.details.outcome).toBe("unvalidated");
-+    expect(verified.details.promoted).toBe(false);
-+    expect(verified.details.status).toBe("candidate");
-+    expect(verified.content[0]!.text).toContain("harness-captured");
++    expect(attempted.details.outcome).toBe("inconclusive");
++    expect(attempted.details.promoted).toBe(false);
++    expect(attempted.details.status).not.toBe("verified");
++    expect(attempted.content[0]!.text).toContain("inconclusive");
 +
 +    // The report — the surface an operator reads — agrees: nothing verified.
 +    const report = await findingsCommand(harness, ctx);
-+    expect(report).toContain("1 finding(s) recorded, none verified yet");
++    expect(report).toContain("none verified yet");
 +  });
 +});
 +
@@ -22995,18 +23424,34 @@ index 0000000..f9f4598
 +});
 diff --git a/packages/cli/test/ardent-evidence.test.ts b/packages/cli/test/ardent-evidence.test.ts
 new file mode 100644
-index 0000000..4a8120e
+index 0000000..af98ee1
 --- /dev/null
 +++ b/packages/cli/test/ardent-evidence.test.ts
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,684 @@
 +import { describe, expect, test } from "bun:test";
 +import {
 +  EvidenceStore,
-+  deriveOutcome,
 +  isEvidenceRecord,
++  outcomeForVerification,
 +  type EvidenceRecord,
 +  type EvidenceRejection,
 +} from "../src/ardent/evidence";
++import { PROFILE_DIGESTS, type ProofProfileId, type ProfileVerdict } from "../src/ardent/verification";
++
++/**
++ * A profile verdict, exactly as `evaluateExperiment` produces one.
++ *
++ * P5 made promotion require one of these: a caller's `passed` boolean is no
++ * longer an input to the outcome, so every test that wants a finding promoted
++ * has to say WHICH profile judged the attempt and how. The digest is the real
++ * registered one, so a test cannot pass with a made-up profile.
++ */
++function verdict(
++  outcome: "supported" | "refuted" | "inconclusive",
++  profileId: ProofProfileId = "authorization-boundary",
++): ProfileVerdict {
++  return { profileId, profileDigest: PROFILE_DIGESTS[profileId], outcome, assertions: [], reasons: [] };
++}
 +
 +function store(persist?: (r: EvidenceRecord) => void) {
 +  return new EvidenceStore({ persist, now: () => 1_000 });
@@ -23090,6 +23535,9 @@ index 0000000..4a8120e
 +        method: "reproduced",
 +        confidence: 0.95,
 +        proof: { observationIds: [obs.id] },
++        // P5: only a registered profile's verdict is a result. The capture is
++        // real, but promotion also needs a profile to have said it discriminates.
++        verdict: verdict("supported"),
 +      }),
 +    );
 +    expect(verified.verification.outcome).toBe("supported");
@@ -23258,7 +23706,7 @@ index 0000000..4a8120e
 +    expect(s.renderFindings()).toContain("1 inconclusive");
 +  });
 +
-+  test("a captured negative result does refute", () => {
++  test("a captured negative result does refute — once a profile says so", () => {
 +    const s = store();
 +    const { finding } = candidate(s);
 +    const proof = captured(s, { source: "http-adapter", summary: "secured build returns 403" });
@@ -23269,6 +23717,7 @@ index 0000000..4a8120e
 +        method: "reproduced against the secured build",
 +        confidence: 0.9,
 +        proof: { observationIds: [proof.id] },
++        verdict: verdict("refuted"),
 +      }),
 +    );
 +    expect(result.verification.outcome).toBe("refuted");
@@ -23317,6 +23766,7 @@ index 0000000..4a8120e
 +        method: "payload reflected in the DOM and painted the marker",
 +        confidence: 0.9,
 +        proof: { observationIds: [proof.id], artifactIds: [shot.id] },
++        verdict: verdict("supported"),
 +      }),
 +    );
 +    expect(withBoth.verification.outcome).toBe("supported");
@@ -23356,6 +23806,7 @@ index 0000000..4a8120e
 +        method: "replayed the captured exchange",
 +        confidence: 0.9,
 +        proof: { artifactIds: [capturedBytes.id] },
++        verdict: verdict("supported"),
 +      }),
 +    );
 +    expect(withCapturedFile.verification.outcome).toBe("supported");
@@ -23375,12 +23826,78 @@ index 0000000..4a8120e
 +    }
 +  });
 +
-+  test("deriveOutcome refuses to upgrade anything short of captured proof", () => {
-+    expect(deriveOutcome({ proofCount: 0, hasRuntimeProof: false, passed: true })).toBe("unvalidated");
-+    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: false, passed: true })).toBe("unvalidated");
-+    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: true, passed: true })).toBe("supported");
-+    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: true, passed: true, inconclusive: true })).toBe("inconclusive");
-+    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: true, passed: false })).toBe("refuted");
++  test("nothing short of captured proof is evaluated at all", () => {
++    const none = { profileId: "authorization-boundary", profileDigest: PROFILE_DIGESTS["authorization-boundary"] };
++    expect(outcomeForVerification({ proofCount: 0, hasRuntimeProof: false })).toBe("unvalidated");
++    expect(outcomeForVerification({ proofCount: 1, hasRuntimeProof: false })).toBe("unvalidated");
++    expect(outcomeForVerification({ proofCount: 1, hasRuntimeProof: false, ...none, recordedOutcome: "supported" })).toBe(
++      "unvalidated",
++    );
++  });
++
++  test("a caller's boolean is a CLAIM: real proof, no evaluation, no promotion", () => {
++    // The P5 rule. Before this, `passed: true` plus a citation the caller chose
++    // was `supported` — the capture was real, but nothing had checked that it
++    // DISCRIMINATED the claim.
++    expect(outcomeForVerification({ proofCount: 1, hasRuntimeProof: true })).toBe("claimed");
++    const s = store();
++    const { finding } = candidate(s);
++    const proof = captured(s, { source: "ardent_verify", summary: "I ran it and it worked" });
++    const result = must(
++      s.addVerification({
++        findingId: finding.id,
++        passed: true,
++        method: "reproduced",
++        confidence: 0.99,
++        proof: { observationIds: [proof.id] },
++      }),
++    );
++    expect(result.verification.outcome).toBe("claimed");
++    expect(result.verification.profileId).toBeUndefined();
++    expect(result.promoted).toBe(false);
++    expect(finding.status).toBe("candidate");
++    expect(s.verifiedFindings()).toHaveLength(0);
++  });
++
++  test("only a registered profile's verdict is a result", () => {
++    expect(
++      outcomeForVerification({
++        proofCount: 1,
++        hasRuntimeProof: true,
++        profileId: "authorization-boundary",
++        profileDigest: PROFILE_DIGESTS["authorization-boundary"],
++        recordedOutcome: "supported",
++      }),
++    ).toBe("supported");
++    expect(
++      outcomeForVerification({
++        proofCount: 1,
++        hasRuntimeProof: true,
++        profileId: "authorization-boundary",
++        profileDigest: PROFILE_DIGESTS["authorization-boundary"],
++        recordedOutcome: "refuted",
++      }),
++    ).toBe("refuted");
++    // An unregistered profile, or one whose definition has changed, cannot be
++    // re-evaluated under the current rule: the assessment is STALE, not reusable.
++    expect(
++      outcomeForVerification({
++        proofCount: 1,
++        hasRuntimeProof: true,
++        profileId: "not-a-profile",
++        profileDigest: "deadbeef",
++        recordedOutcome: "supported",
++      }),
++    ).toBe("inconclusive");
++    expect(
++      outcomeForVerification({
++        proofCount: 1,
++        hasRuntimeProof: true,
++        profileId: "authorization-boundary",
++        profileDigest: "old-version-digest",
++        recordedOutcome: "supported",
++      }),
++    ).toBe("inconclusive");
 +  });
 +});
 +
@@ -23485,6 +24002,7 @@ index 0000000..4a8120e
 +        method: "reproduced",
 +        confidence: 0.9,
 +        proof: { observationIds: [obs.id] },
++        verdict: verdict("supported"),
 +      }),
 +    );
 +    return emitted;
@@ -23596,10 +24114,10 @@ index 0000000..4a8120e
 +});
 diff --git a/packages/cli/test/ardent-extension.test.ts b/packages/cli/test/ardent-extension.test.ts
 new file mode 100644
-index 0000000..463da59
+index 0000000..7cec0fa
 --- /dev/null
 +++ b/packages/cli/test/ardent-extension.test.ts
-@@ -0,0 +1,799 @@
+@@ -0,0 +1,773 @@
 +import { describe, expect, test } from "bun:test";
 +import { existsSync, mkdtempSync, rmSync } from "node:fs";
 +import { tmpdir } from "node:os";
@@ -23995,13 +24513,26 @@ index 0000000..463da59
 +    expect(result.content[0]!.text).toContain("Rejected");
 +  });
 +
-+  test("ardent_verify records a bare claim as unvalidated and never promotes on a model note", async () => {
++  test("ardent_verify takes no assertion from the model: the profile's own capture decides", async () => {
 +    const { commandDefs, handlers, tools } = build(() => engagedConfig, {
 +      screenshotDir: mkdtempSync(join(tmpdir(), "ardent-shots-")),
 +      capture: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3]) }),
 +    });
 +    await handlers.get("session_start")![0]!({}, makeCtx());
 +    await startEngagement({ commandDefs });
++    const verify = tools.find((t) => t.name === "ardent_verify")!;
++
++    // P5: the model has no way to assert a result. The tool's parameters name a
++    // profile and two EXCHANGES; there is no `passed`, and no way to supply
++    // proof, because the application runs and captures both exchanges itself.
++    const schema = verify as unknown as { parameters?: { properties?: Record<string, unknown> } };
++    const fields = Object.keys(schema.parameters?.properties ?? {});
++    expect(fields).toContain("profile");
++    expect(fields).toContain("control_url");
++    expect(fields).not.toContain("passed");
++    expect(fields).not.toContain("proof_observation_ids");
++    expect(fields).not.toContain("proof_artifact_ids");
++
 +    const note = tools.find((t) => t.name === "ardent_note")!;
 +    const observed = (await note.execute(
 +      "call-note",
@@ -24024,71 +24555,32 @@ index 0000000..463da59
 +      undefined,
 +      makeCtx(),
 +    )) as { details: { finding_id: string } };
-+    const verify = tools.find((t) => t.name === "ardent_verify")!;
 +
-+    const claimed = (await verify.execute(
-+      "call-verify-unproven",
-+      { finding_id: created.details.finding_id, passed: true, method: "reproduced" },
-+      undefined,
-+      undefined,
-+      makeCtx(),
-+    )) as {
-+      content: Array<{ text: string }>;
-+      details: { outcome?: string; promoted?: boolean; status?: string };
-+    };
-+    expect(claimed.content[0]!.text).toContain("unvalidated");
-+    expect(claimed.details.outcome).toBe("unvalidated");
-+    expect(claimed.details.promoted).toBe(false);
-+    expect(claimed.details.status).toBe("candidate");
-+
-+    // The same claim with a citation is still the model's word: the note came
-+    // from ardent_note, so it is model-authored proof, and a model-authored
-+    // record cannot carry a verdict (plan checkpoint 4).
-+    const cited = (await verify.execute(
-+      "call-verify-cited",
++    // The exchanges the model names are refused by scope, so the harness
++    // captures nothing at all. The attempt RAN and could not discriminate:
++    // `inconclusive` — a real, reportable result that is specifically not a
++    // promotion. The model's note is never an input to the verdict.
++    const attempted = (await verify.execute(
++      "call-verify-nocapture",
 +      {
 +        finding_id: created.details.finding_id,
-+        passed: true,
-+        method: "reproduced",
-+        proof_observation_ids: [observed.details.observation_id],
++        profile: "authorization-boundary",
++        probe_method: "GET",
++        probe_url: "http://192.0.2.10/admin",
++        control_method: "GET",
++        control_url: "http://192.0.2.10/admin",
 +      },
 +      undefined,
 +      undefined,
 +      makeCtx(),
 +    )) as {
 +      content: Array<{ text: string }>;
-+      details: { outcome?: string; promoted?: boolean; status?: string };
++      details: { ok?: boolean; outcome?: string; promoted?: boolean; status?: string };
 +    };
-+    expect(cited.details.outcome).toBe("unvalidated");
-+    expect(cited.details.promoted).toBe(false);
-+    expect(cited.details.status).toBe("candidate");
-+    expect(cited.content[0]!.text).toContain("unvalidated");
-+    expect(cited.content[0]!.text).toContain("harness-captured");
-+
-+    // A screenshot is captured by the harness but still cannot verify: it
-+    // shows what rendered, not what executed.
-+    const shot = tools.find((t) => t.name === "ardent_screenshot")!;
-+    const captured = (await shot.execute(
-+      "call-shot",
-+      { url: "http://10.0.0.5/admin", description: "admin page painted" },
-+      undefined,
-+      undefined,
-+      makeCtx(),
-+    )) as { details: { artifact_id?: string } };
-+    const withShot = (await verify.execute(
-+      "call-verify-shot",
-+      {
-+        finding_id: created.details.finding_id,
-+        passed: true,
-+        method: "the page painted the marker",
-+        proof_artifact_ids: [captured.details.artifact_id!],
-+      },
-+      undefined,
-+      undefined,
-+      makeCtx(),
-+    )) as { content: Array<{ text: string }>; details: { outcome?: string; code?: string } };
-+    expect(withShot.details.outcome).toBeUndefined();
-+    expect(withShot.details.code).toBe("validation");
++    expect(attempted.details.outcome).toBe("inconclusive");
++    expect(attempted.details.promoted).toBe(false);
++    expect(attempted.details.status).toBe("inconclusive");
++    expect(attempted.content[0]!.text).toContain("inconclusive");
 +  });
 +
 +  test("announces nothing at session start — the HUD strip is the only scope surface", async () => {
@@ -26143,10 +26635,10 @@ index 0000000..001a8fa
 +});
 diff --git a/packages/cli/test/ardent-negative-conclusion.test.ts b/packages/cli/test/ardent-negative-conclusion.test.ts
 new file mode 100644
-index 0000000..b8df2cf
+index 0000000..5a6d1ab
 --- /dev/null
 +++ b/packages/cli/test/ardent-negative-conclusion.test.ts
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,187 @@
 +// F2: a correct NEGATIVE conclusion must grade as a result, not as a finding.
 +//
 +// The live smoke trial (ardent-live-smoke-trial.md, F2) found the defect: on the
@@ -26168,6 +26660,18 @@ index 0000000..b8df2cf
 +import { EvidenceStore, type EvidenceRecord } from "../src/ardent/evidence";
 +import { findingAssertion, type Finding } from "../src/ardent/types";
 +import { foldObservedOutcome, proofVerdict, type TrialEvidence } from "../eval/grader";
++import { PROFILE_DIGESTS, type ProfileVerdict } from "../src/ardent/verification";
++
++/** A registered profile's verdict, as `evaluateExperiment` produces one. */
++function verdict(outcome: ProfileVerdict["outcome"] = "supported"): ProfileVerdict {
++  return {
++    profileId: "authorization-boundary",
++    profileDigest: PROFILE_DIGESTS["authorization-boundary"],
++    outcome,
++    assertions: [],
++    reasons: [],
++  };
++}
 +
 +/** A store with one runtime-origin capture, so a verification can carry a verdict. */
 +function storeWithCapture() {
@@ -26200,6 +26704,7 @@ index 0000000..b8df2cf
 +    method: "captured refusal",
 +    confidence: 0.9,
 +    proof: { observationIds: [proofId] },
++    verdict: verdict(),
 +  });
 +  if (!verified.ok) throw new Error(`verification rejected: ${verified.error}`);
 +  return { store, finding: verified.finding, proofId };
@@ -26848,10 +27353,10 @@ index 0000000..5cd7dc8
 +});
 diff --git a/packages/cli/test/ardent-relations.test.ts b/packages/cli/test/ardent-relations.test.ts
 new file mode 100644
-index 0000000..8b0529b
+index 0000000..e9ec927
 --- /dev/null
 +++ b/packages/cli/test/ardent-relations.test.ts
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,322 @@
 +// Unit tests for attack-path relations: the store's validation rules, chain
 +// computation, report rendering, and the TUI rows.
 +//
@@ -26862,6 +27367,24 @@ index 0000000..8b0529b
 +import { EvidenceStore } from "../src/ardent/evidence";
 +import { linkCallLines, linkResultLines, type ThemeLike } from "../src/ardent/render";
 +import { maxSeverity, severityRank, type Severity } from "../src/ardent/types";
++import { PROFILE_DIGESTS, type ProfileVerdict } from "../src/ardent/verification";
++
++/**
++ * A registered profile's verdict, exactly as `evaluateExperiment` produces one.
++ *
++ * P5 made a profile evaluation the ONLY thing that promotes a finding: a
++ * caller's `passed` boolean is not an input to the outcome any more, so a test
++ * that wants a link counted as verified has to record how it was judged.
++ */
++function verdict(outcome: ProfileVerdict["outcome"] = "supported"): ProfileVerdict {
++  return {
++    profileId: "authorization-boundary",
++    profileDigest: PROFILE_DIGESTS["authorization-boundary"],
++    outcome,
++    assertions: [],
++    reasons: [],
++  };
++}
 +
 +const plain: ThemeLike = { fg: (_c, t) => t, bold: (t) => t };
 +const theme: ThemeLike = { fg: (color, t) => `<${color}>${t}</${color}>`, bold: (t) => t };
@@ -27053,6 +27576,7 @@ index 0000000..8b0529b
 +      method: "repro",
 +      confidence: 0.9,
 +      proof: { observationIds: ["obs-1"] },
++      verdict: verdict(),
 +    });
 +    expect(store.attackPaths()[0]!.verifiedCount).toBe(1);
 +  });
@@ -27096,6 +27620,7 @@ index 0000000..8b0529b
 +      method: "repro",
 +      confidence: 0.9,
 +      proof: { observationIds: ["obs-1"] },
++      verdict: verdict(),
 +    });
 +
 +    const report = store.renderFindings();
@@ -27114,6 +27639,7 @@ index 0000000..8b0529b
 +      method: "repro",
 +      confidence: 0.9,
 +      proof: { observationIds: ["obs-1"] },
++      verdict: verdict(),
 +    });
 +    expect(store.renderFindings()).not.toContain("attack path");
 +  });
@@ -27155,10 +27681,10 @@ index 0000000..8b0529b
 +});
 diff --git a/packages/cli/test/ardent-render.test.ts b/packages/cli/test/ardent-render.test.ts
 new file mode 100644
-index 0000000..ba5ab7e
+index 0000000..25cf57d
 --- /dev/null
 +++ b/packages/cli/test/ardent-render.test.ts
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,532 @@
 +// Unit tests for src/ardent/render.ts. Pure line builders, exercised with a
 +// fake theme — no terminal, no pi-tui. The visual contract here is "boxless":
 +// no box-drawing frame characters, structure carried by indent + colour.
@@ -27376,20 +27902,32 @@ index 0000000..ba5ab7e
 +});
 +
 +describe("ardent_verify rows", () => {
-+  test("call shows finding and verdict", () => {
-+    const [line] = verifyCallLines(plain, { finding_id: "find-1", passed: true, method: "reproduced" }, 200);
-+    expect(line).toContain("✓ ardent_verify find-1 pass");
-+    expect(line).toContain("reproduced");
++  test("the call row shows the experiment, never a verdict", () => {
++    // P5: the caller names a profile and two actions; no outcome exists yet, so
++    // there is deliberately no pass/fail mark on the call row.
++    const [line] = verifyCallLines(
++      plain,
++      {
++        finding_id: "find-1",
++        profile: "authorization-boundary",
++        probe_url: "http://x/objects/1",
++        control_url: "http://x/objects/1",
++      },
++      200,
++    );
++    expect(line).toContain("ardent_verify find-1");
++    expect(line).toContain("authorization-boundary");
++    expect(line).not.toContain("✓");
 +  });
 +
 +  test("a pass reads as verified; a refutation is not an error", () => {
-+    const pass = verifyResultLines(theme, { ok: true, verification_id: "ver-2", passed: true, finding_id: "find-3", method: "reproduced" }, "", 200);
++    const pass = verifyResultLines(theme, { ok: true, verification_id: "ver-2", outcome: "supported", finding_id: "find-3", method: "reproduced" }, "", 200);
 +    // The method is not echoed — the call row shows it.
 +    expect(stripTags(pass.join("\n"))).toContain("✓ verified ver-2 · find-3");
 +    expect(stripTags(pass.join("\n"))).not.toContain("reproduced");
 +    expect(pass.join("\n")).toContain("<success>");
 +
-+    const fail = verifyResultLines(theme, { ok: true, verification_id: "ver-3", passed: false, finding_id: "find-4", method: "no longer reproducible" }, "", 200);
++    const fail = verifyResultLines(theme, { ok: true, verification_id: "ver-3", outcome: "refuted", finding_id: "find-4", method: "no longer reproducible" }, "", 200);
 +    expect(stripTags(fail.join("\n"))).toContain("refuted");
 +    expect(fail.join("\n")).toContain("<warning>");
 +    expect(fail.join("\n")).not.toContain("<error>");
@@ -27538,8 +28076,8 @@ index 0000000..ba5ab7e
 +    ["finding call", findingCallLines(plain, { title: "t", severity: "high", target: "1.1.1.1", description: "d", observation_ids: [] }, 80)],
 +    ["finding result", findingResultLines(plain, { ok: true, finding_id: "find-1", severity: "high", title: "t", target: "1.1.1.1", observation_count: 1 }, "", 80)],
 +    ["finding rejected", findingResultLines(plain, { ok: false }, "nope", 80)],
-+    ["verify call", verifyCallLines(plain, { finding_id: "find-1", passed: true, method: "m" }, 80)],
-+    ["verify result", verifyResultLines(plain, { ok: true, verification_id: "ver-1", passed: true }, "", 80)],
++    ["verify call", verifyCallLines(plain, { finding_id: "find-1", profile: "authorization-boundary", probe_url: "http://x/a", control_url: "http://x/a" }, 80)],
++    ["verify result", verifyResultLines(plain, { ok: true, verification_id: "ver-1", outcome: "supported" }, "", 80)],
 +    ["spawn call", spawnCallLines(plain, { task: "t" }, 80)],
 +    ["spawn result", spawnResultLines(plain, { ok: true, depth: 1 }, "out", 80, false)],
 +    ["screenshot call", screenshotCallLines(plain, { url: "http://x/", description: "d" }, 80)],
@@ -29666,7 +30204,7 @@ index 0000000..22719c8
 +});
 diff --git a/packages/cli/test/ardent-verification.test.ts b/packages/cli/test/ardent-verification.test.ts
 new file mode 100644
-index 0000000..89b24db
+index 0000000..fb39ced
 --- /dev/null
 +++ b/packages/cli/test/ardent-verification.test.ts
 @@ -0,0 +1,250 @@
@@ -29873,7 +30411,7 @@ index 0000000..89b24db
 +      attempt: { probe: afterTransition, control: prerequisite },
 +    });
 +    expect(verdict.outcome).toBe("supported");
-+    expect(verdict.assertions.find((a) => a.id === "probe.introduced_state_the_prerequisite_did_not")!.passed).toBe(true);
++    expect(verdict.assertions.find((a) => a.id === "probe.introduced_state_the_baseline_did_not")!.passed).toBe(true);
 +  });
 +
 +  test("a prerequisite that was never accepted is inconclusive — the workflow was not exercised", () => {

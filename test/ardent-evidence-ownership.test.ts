@@ -397,7 +397,7 @@ describe("checkpoint 3 — a failed durable write is not success", () => {
 });
 
 describe("checkpoint 4 — model prose cannot verify anything", () => {
-  test("a cited note plus passed:true stays an unvalidated claim in the report", async () => {
+  test("a model's assertion is not an input: an attempt the harness cannot capture is inconclusive, never verified", async () => {
     const engagementsDir = freshEngagementsDir();
     const harness = build({ engagementsDir });
     const ctx = makeCtx("sess-1");
@@ -425,26 +425,34 @@ describe("checkpoint 4 — model prose cannot verify anything", () => {
       ctx,
     )) as { details: { finding_id: string } };
 
-    const verified = (await tool(harness, "ardent_verify").execute(
+    // P5: the model supplies the exchanges and the profile, and NO verdict.
+    // Even naming the claim's own note and asserting `passed` changes nothing —
+    // the tool reads neither, and the two exchanges it runs are refused by
+    // scope, so the harness captures nothing to judge. An attempt that ran and
+    // could not discriminate is `inconclusive`, never a promotion.
+    const attempted = (await tool(harness, "ardent_verify").execute(
       "c3",
       {
         finding_id: created.details.finding_id,
+        profile: "authorization-boundary",
+        probe_method: "GET",
+        probe_url: "http://192.0.2.10/admin",
+        control_method: "GET",
+        control_url: "http://192.0.2.10/admin",
         passed: true,
-        method: "reproduced it myself",
-        proof_observation_ids: [noted.details.observation_id],
       },
       undefined,
       undefined,
       ctx,
     )) as { content: Array<{ text: string }>; details: { outcome?: string; promoted?: boolean; status?: string } };
-    expect(verified.details.outcome).toBe("unvalidated");
-    expect(verified.details.promoted).toBe(false);
-    expect(verified.details.status).toBe("candidate");
-    expect(verified.content[0]!.text).toContain("harness-captured");
+    expect(attempted.details.outcome).toBe("inconclusive");
+    expect(attempted.details.promoted).toBe(false);
+    expect(attempted.details.status).not.toBe("verified");
+    expect(attempted.content[0]!.text).toContain("inconclusive");
 
     // The report — the surface an operator reads — agrees: nothing verified.
     const report = await findingsCommand(harness, ctx);
-    expect(report).toContain("1 finding(s) recorded, none verified yet");
+    expect(report).toContain("none verified yet");
   });
 });
 

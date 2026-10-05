@@ -521,19 +521,29 @@ export function findingResultLines(
 
 export interface VerifyCallArgs {
     finding_id: string;
-    passed: boolean;
-    method: string;
+    /** The registered profile that will judge the attempt (P5). */
+    profile: string;
+    probe_url: string;
+    control_url: string;
 }
 
+/**
+ * The call row shows the EXPERIMENT, not a result: the caller names a profile and
+ * two actions, and the outcome does not exist yet. There is deliberately no
+ * pass/fail glyph here — a mark on the call row would be the model's own claim
+ * rendered as a verdict, which is what P5 removed.
+ */
 export function verifyCallLines(theme: ThemeLike, args: VerifyCallArgs, width: number): string[] {
     const spans: Span[] = [
-        { text: `${args.passed ? GLYPH.verifyPass : GLYPH.verifyFail} `, color: args.passed ? "success" : "warning" },
+        { text: `${GLYPH.live} `, color: "accent" },
         { text: "ardent_verify", color: "toolTitle", bold: true },
     ];
     if (args.finding_id) spans.push({ text: ` ${args.finding_id}`, color: "accent" });
-    spans.push(args.passed ? { text: " pass", color: "success" } : { text: " fail", color: "warning" });
-    const method = oneLine(args.method);
-    if (method) spans.push(dim(` ${method}`));
+    if (args.profile) spans.push(dim(` ${args.profile}`));
+    const probe = oneLine(args.probe_url);
+    const control = oneLine(args.control_url);
+    if (probe) spans.push(dim(` probe ${probe}`));
+    if (control) spans.push(dim(` control ${control}`));
     return [row(theme, spans, width)];
 }
 
@@ -541,6 +551,10 @@ export interface VerifyDetailsLike {
     ok?: boolean;
     verification_id?: string;
     passed?: boolean;
+    /** The registered experiment this attempt executed (P5). */
+    attempt_id?: string;
+    /** Which registered profile judged it. */
+    profile?: string;
     finding_id?: string;
     method?: string;
     /** What the attempt actually established — see VerificationOutcome. */
@@ -573,7 +587,9 @@ export function verifyResultLines(
                 ? { text: "refuted", color: "warning", glyph: GLYPH.verifyFail }
                 : outcome === "inconclusive"
                     ? { text: "inconclusive", color: "warning", glyph: GLYPH.verifyFail }
-                    : { text: "unvalidated", color: "warning", glyph: GLYPH.verifyFail };
+                    : outcome === "claimed"
+                        ? { text: "claimed — not evaluated", color: "warning", glyph: GLYPH.verifyFail }
+                        : { text: "unvalidated", color: "warning", glyph: GLYPH.verifyFail };
     const head: Span[] = [{ text: verdict.text, color: verdict.color, bold: true }];
     if (details?.verification_id) head.push({ text: ` ${details.verification_id}`, color: "accent" });
     // The method is NOT repeated — the call row shows it, and it can be long

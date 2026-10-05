@@ -339,17 +339,36 @@ async function run(input: ScenarioRunInput): Promise<ScenarioRunResult> {
         observationIds: [proofId],
       });
       if (findingId !== undefined) {
+        // `guarded-transition`: a BASELINE read of the object runs first (it must
+        // be reached, and it is what makes the probe's new content a state change
+        // rather than a constant), then the guarded transition is attempted
+        // WITHOUT its prerequisite. Deliberately no prerequisite request: doing
+        // it would make the transition legitimate and the claim meaningless.
+        //
+        // The final route is idempotent in this fixture, so re-running it is a
+        // genuine fresh attempt rather than a replay of the earlier one.
         const verification = await rt.verify({
           findingId,
-          passed: true,
-          method:
-            "replayed the omission: the captured exchange for the final transition returned 200 and carried " +
-            "the protected marker, while no request for the required earlier step was ever made",
-          proofIds: [proofId],
+          profile: "guarded-transition",
+          control: {
+            method: "GET",
+            url: `${input.target.appOrigin}/workflow/${truth.objectId}`,
+            identity: "fixture-a",
+          },
+          probe: {
+            method: "POST",
+            url: `${input.target.appOrigin}${truth.finalPath}`,
+            identity: "fixture-a",
+          },
         });
         if (verification?.outcome === "unvalidated") {
           rt.notes.push(
-            "the verification was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchange",
+            "the attempt was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchanges",
+          );
+        }
+        if (verification?.outcome === "inconclusive") {
+          rt.notes.push(
+            "the profile could not discriminate the claim, so this is inconclusive rather than demonstrated",
           );
         }
       }

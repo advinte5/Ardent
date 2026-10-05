@@ -33,7 +33,15 @@ import type {
   VerificationOutcome,
   WorkingMemory,
 } from "./types";
-import { emptyWorkingMemory } from "./types";
+import { emptyWorkingMemory, findingAssertion } from "./types";
+import {
+  describeProfile,
+  evaluateExperiment,
+  isProofProfileId,
+  PROFILE_DIGESTS,
+  PROOF_PROFILE_IDS,
+  type CaptureEvidence,
+} from "./verification";
 import {
   ARDENT_REQUEST_TOOL,
   ARDENT_SCREENSHOT_TOOL,
@@ -307,26 +315,32 @@ const FINDING_PARAMS = Type.Object({
   ),
 });
 
+// P5: an attempt is a REGISTERED EXPERIMENT the application runs, judged by a
+// registered proof profile. There is deliberately no `passed` argument — a
+// caller-supplied verdict is exactly what this replaced, because the bytes a
+// caller captures being real and those bytes DISCRIMINATING the claim are two
+// different questions and only the profile answers the second.
 const VERIFY_PARAMS = Type.Object({
-  finding_id: Type.String({ description: "Finding id (find-N) to verify." }),
-  passed: Type.Boolean({ description: "True if reproduced/confirmed." }),
-  method: Type.String({ description: "How it was verified." }),
-  proof_observation_ids: Type.Optional(
-    Type.Array(Type.String(), {
+  finding_id: Type.String({ description: "Finding id (find-N) to reproduce." }),
+  profile: Type.Union(
+    PROOF_PROFILE_IDS.map((id) => Type.Literal(id)),
+    {
       description:
-        "Observation ids (obs-N) carrying this result — the record of the test that ran. Without at least one proof id (or proof_artifact_ids) the attempt is recorded as unvalidated and the finding is NOT promoted.",
-    }),
+        "The registered proof profile that will judge the attempt. Each profile names the control it requires; an unknown profile is refused rather than defaulted.",
+    },
   ),
-  proof_artifact_ids: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Artifact ids (art-N) carrying this result, e.g. the captured exchange or screenshot.",
-    }),
+  probe_method: Type.String({ description: "HTTP method for the probe — the action that tests the claim." }),
+  probe_url: Type.String({ description: "Absolute http(s) URL for the probe. Must be inside the engagement scope." }),
+  probe_identity: Type.Optional(
+    Type.String({ description: "Identity reference (e.g. an account name) to run the probe as. Never a credential." }),
   ),
-  inconclusive: Type.Optional(
-    Type.Boolean({
-      description:
-        "Set when the test actually ran but could not discriminate either way. Recorded as inconclusive — explicitly not a refutation.",
-    }),
+  control_method: Type.String({
+    description:
+      "HTTP method for the control — the comparison exchange. Every profile requires one: a claim is a DIFFERENCE, and a single exchange cannot show one.",
+  }),
+  control_url: Type.String({ description: "Absolute http(s) URL for the control. Must be inside the engagement scope." }),
+  control_identity: Type.Optional(
+    Type.String({ description: "Identity reference to run the control as. Usually a different account than the probe." }),
   ),
   confidence: Type.Optional(Type.Number({ description: "0..1 confidence.", default: 0.8 })),
   notes: Type.Optional(Type.String({ description: "Optional details." })),
@@ -449,7 +463,13 @@ interface FindingToolDetails {
 interface VerifyToolDetails {
   ok: boolean;
   verification_id?: string;
-  passed?: boolean;
+  /** The registered experiment this attempt executed. */
+  attempt_id?: string;
+  /** Which registered profile judged it, and at which version. */
+  profile?: string;
+  profile_digest?: string;
+  /** One line per bounded assertion, so a refusal says which one was not met. */
+  assertions?: string;
   finding_id?: string;
   method?: string;
   /** What the attempt established — the verdict the store actually recorded. */
@@ -1402,13 +1422,14 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
 
       pi.registerTool<typeof VERIFY_PARAMS, VerifyToolDetails>({
         name: ARDENT_VERIFY_TOOL,
-        label: "Record verification",
+        label: "Reproduce",
         description:
-          "Record the outcome of testing a candidate finding, citing the evidence that carries the result. The finding only changes status when the attempt cites proof: a claim with no proof ids is recorded as unvalidated and does not promote. Only verified findings appear in the report.",
-        promptSnippet: "Record the verification result for an Ardent finding",
+          "Reproduce a candidate through a registered proof profile and let the application judge it. You supply the two EXCHANGES and the profile; this tool runs both through the captured adapter itself, so the proof is the harness's own capture rather than a citation you chose. There is no way to assert a result: the profile decides, and it returns supported, refuted or inconclusive. Without a control that could have succeeded, the attempt is inconclusive rather than proven.",
+        promptSnippet: "Reproduce an Ardent finding through a registered proof profile",
         promptGuidelines: [
-          "Cite the ids that carry the result in proof_observation_ids / proof_artifact_ids — that is what promotes the finding. `passed: true` alone records an unvalidated claim and leaves it a candidate.",
-          "Use inconclusive: true when the test ran but could not discriminate; that is explicitly not a refutation.",
+          "Choose the profile by what your claim actually is; its requirements are enforced, not assumed.",
+          "Supply a CONTROL that would have come out differently if you were wrong. 'authorization-boundary' wants a control that fetches the SAME resource as an identity that IS entitled to it — without it, a refusal proves nothing and the attempt is inconclusive.",
+          "Both exchanges are run by the harness and captured as proof, so you cannot choose the evidence. If setup fails, is refused by scope, or the bytes are truncated, the attempt is inconclusive — which is not a refutation.",
         ],
         parameters: VERIFY_PARAMS,
         renderCall(args, theme) {
@@ -1420,20 +1441,155 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
             verifyResultLines(theme, result.details, text, width),
           );
         },
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, params, signal) {
           const refused = evidenceCommandRefusal();
           if (refused) return refused;
+
+          const candidate = evidenceNow().findings.find((f) => f.id === params.finding_id);
+          if (candidate === undefined) {
+            return {
+              content: [{ type: "text" as const, text: `Rejected: unknown finding id: ${params.finding_id}` }],
+              details: { ok: false, code: "not_found", error: `unknown finding id: ${params.finding_id}` },
+            };
+          }
+          if (candidate.status === "verified" || candidate.status === "refuted") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Rejected: ${candidate.id} already reached ${candidate.status}; a settled finding is not re-verified in place.`,
+                },
+              ],
+              details: { ok: false, code: "validation", error: `already ${candidate.status}` },
+            };
+          }
+          if (!isProofProfileId(params.profile)) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Rejected: unknown proof profile ${String(params.profile)}. Known: ${PROOF_PROFILE_IDS.join(", ")}.`,
+                },
+              ],
+              details: { ok: false, code: "validation", error: "unknown proof profile" },
+            };
+          }
+          const profileId = params.profile;
+          const profile = describeProfile(profileId);
+
+          // Register the intent BEFORE running anything, so the actions this
+          // attempt claims to have performed are the actions it registered.
+          const registered = evidenceNow().addExperiment({
+            findingId: candidate.id,
+            profileId,
+            profileDigest: PROFILE_DIGESTS[profileId],
+            probe: {
+              method: params.probe_method,
+              url: params.probe_url,
+              ...(params.probe_identity === undefined ? {} : { identity: params.probe_identity }),
+            },
+            control: {
+              method: params.control_method,
+              url: params.control_url,
+              ...(params.control_identity === undefined ? {} : { identity: params.control_identity }),
+            },
+          });
+          if (!registered.ok) {
+            if (registered.code === "storage_unavailable") return storageFailure(registered.error);
+            return {
+              content: [{ type: "text" as const, text: `Rejected: ${registered.error}` }],
+              details: { ok: false, code: registered.code, error: registered.error },
+            };
+          }
+
+          // Authority stays in the adapter: the caller names actions and an
+          // identity reference, never a verdict. Redirects are denied outright —
+          // an experiment's two exchanges are the experiment.
+          const bound = resolveEngagement();
+          const scope = bound.kind === "bound" ? bound.engagement.scope : state.config!.scope;
+          const identities = currentIdentities();
+          const isOriginAllowed = (origin: string): boolean => {
+            try {
+              return isInScope(new URL(origin).hostname, scope);
+            } catch {
+              return false;
+            }
+          };
+          const limits = { maxRedirects: HTTP_MAX_REDIRECTS, timeoutMs: HTTP_TIMEOUT_MS, maxBytes: HTTP_MAX_BYTES };
+
+          const runSide = async (
+            side: { method: string; url: string; identity?: string },
+          ): Promise<{ capture: CaptureEvidence; storeFailure?: string }> => {
+            const exchange = await executeHttpRequest({
+              spec: {
+                method: side.method,
+                url: side.url,
+                ...(side.identity === undefined ? {} : { identity: side.identity }),
+                redirect: "deny",
+              },
+              limits,
+              isOriginAllowed,
+              ...(identities === undefined ? {} : { resolveIdentity: identities }),
+              ...(signal === undefined ? {} : { signal }),
+            });
+            if (!exchange.ok) {
+              return { capture: { ok: false, ...(exchange.code === undefined ? {} : { code: exchange.code }) } };
+            }
+            let host = "";
+            try {
+              host = new URL(exchange.finalUrl ?? side.url).hostname;
+            } catch {
+              host = "";
+            }
+            const summary =
+              `[${profileId}] ${exchange.request.method} ${exchange.request.url} -> ${exchange.finalStatus}` +
+              (exchange.truncated ? " (body truncated)" : "");
+            const recorded = evidenceNow().addObservation({
+              source: ARDENT_VERIFY_TOOL,
+              summary,
+              target: host,
+              origin: "runtime",
+              ...(exchange.body === undefined || exchange.body === ""
+                ? {}
+                : { raw: exchange.body.slice(0, HTTP_RAW_CAPTURE_BYTES) }),
+            });
+            const capture: CaptureEvidence = {
+              ok: true,
+              ...(exchange.finalStatus === undefined ? {} : { status: exchange.finalStatus }),
+              ...(exchange.body === undefined ? {} : { body: exchange.body }),
+              truncated: exchange.truncated,
+              ...(recorded.ok ? { observationId: recorded.observation.id } : {}),
+            };
+            return recorded.ok ? { capture } : { capture, storeFailure: recorded.error };
+          };
+
+          // CONTROL FIRST. A control establishes the baseline a claim is
+          // measured against, so running the probe first would let the probe's
+          // own effect contaminate the comparison — fatal for a state-change
+          // claim, and merely wasteful for the read-only ones.
+          const control = await runSide(registered.experiment.control);
+          const probe = await runSide(registered.experiment.probe);
+          const storeFailure = probe.storeFailure ?? control.storeFailure;
+          if (storeFailure !== undefined) return storageFailure(storeFailure);
+
+          // The application evaluates. The model supplied the exchanges and the
+          // profile id; it supplied no assertion, threshold or verdict.
+          const verdict = evaluateExperiment({
+            profileId,
+            attempt: { probe: probe.capture, control: control.capture },
+            claim: findingAssertion(candidate),
+          });
+          const proofObservationIds = [probe.capture.observationId, control.capture.observationId].filter(
+            (id): id is string => id !== undefined,
+          );
           const result = evidenceNow().addVerification({
-            findingId: params.finding_id,
-            passed: params.passed,
-            method: params.method,
+            findingId: candidate.id,
+            method: `profile ${profileId} v${profile.version}`,
             confidence: (params.confidence ?? 0.8) as Confidence,
             ...(params.notes === undefined ? {} : { notes: params.notes }),
-            proof: {
-              ...(params.proof_observation_ids === undefined ? {} : { observationIds: params.proof_observation_ids }),
-              ...(params.proof_artifact_ids === undefined ? {} : { artifactIds: params.proof_artifact_ids }),
-            },
-            ...(params.inconclusive === undefined ? {} : { inconclusive: params.inconclusive }),
+            proof: { observationIds: proofObservationIds },
+            verdict,
+            attemptId: registered.experiment.id,
           });
           if (!result.ok) {
             if (result.code === "storage_unavailable") return storageFailure(result.error);
@@ -1442,33 +1598,42 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
               details: { ok: false, code: result.code, error: result.error },
             };
           }
-          const finding = result.finding;
+
+          const settled = result.finding;
           // The "Verify find-N" todo is only finished once the finding reached
-          // a verdict. An unvalidated or inconclusive attempt leaves the work
-          // open: closing it would bury a live lead behind a bare claim.
-          if (finding.status === "verified" || finding.status === "refuted") {
-            completeTodo(state.memory, `Verify ${finding.id}: ${finding.title}`);
+          // a verdict. A claimed or inconclusive attempt leaves the work open:
+          // closing it would bury a live lead behind a bare claim.
+          if (settled.status === "verified" || settled.status === "refuted") {
+            completeTodo(state.memory, `Verify ${settled.id}: ${settled.title}`);
           }
           pi.appendEntry("ardent-memory", state.memory);
           refreshHud();
+
           const outcome = result.verification.outcome;
-          const verdict = outcome === "supported" ? "verified" : outcome;
-          const text =
-            outcome === "unvalidated"
-              ? `${result.verification.id} recorded: unvalidated — the attempt cites no harness-captured proof, so ${finding.id} remains ${finding.status}. ` +
-                "A model-authored note or a bare passed: true cannot verify anything; the proof has to be a record the execution path captured."
-              : `${result.verification.id}: ${verdict} (${params.method}) → ${finding.id} is now ${finding.status}.`;
+          const lines = [
+            `${result.verification.id}: ${outcome} — profile "${profile.title}" (${profileId} v${profile.version}) → ${settled.id} is now ${settled.status}.`,
+          ];
+          for (const assertion of verdict.assertions) {
+            lines.push(`  ${assertion.passed ? "ok" : "NOT MET"} ${assertion.id}: ${assertion.detail}`);
+          }
+          for (const reason of verdict.reasons) lines.push(`  ${reason}`);
+          if (outcome === "inconclusive") {
+            lines.push(`  inconclusive is not a refutation. This profile requires: ${profile.requires}`);
+          }
           return {
-            content: [{ type: "text" as const, text }],
+            content: [{ type: "text" as const, text: lines.join("\n") }],
             details: {
               ok: true,
               verification_id: result.verification.id,
-              passed: params.passed,
+              attempt_id: registered.experiment.id,
+              profile: profileId,
+              profile_digest: verdict.profileDigest,
               outcome,
               promoted: result.promoted,
-              status: finding.status,
-              finding_id: params.finding_id,
-              method: params.method,
+              status: settled.status,
+              finding_id: candidate.id,
+              method: `profile ${profileId} v${profile.version}`,
+              assertions: verdict.assertions.map((a) => `${a.passed ? "ok" : "fail"}:${a.id}`).join(" "),
             },
           };
         },

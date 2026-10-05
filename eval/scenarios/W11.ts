@@ -310,14 +310,24 @@ async function run(input: ScenarioRunInput): Promise<ScenarioRunResult> {
       });
 
       if (findingId !== undefined) {
+        // `route-comparison`: the sanctioned route must be REFUSED (the control)
+        // and the alias must APPLY the effect (the probe). If both behaved the
+        // same there would be no defect, so the control is what makes the claim
+        // mean something — and the application, not the driver, reads that from
+        // its own captures.
         await rt.verify({
           findingId,
-          passed: true,
-          method:
-            `Replayed the ${TARGET_STATE} transition on ${truth.objectId} through the undocumented alias ` +
-            `${aliasPath(truth.objectId)} and captured the exchange end-to-end; the sanctioned route refuses ` +
-            "the same request, so the reachability is the defect rather than the intended behaviour.",
-          proofIds: [alias.observation_id],
+          profile: "route-comparison",
+          control: {
+            method: "POST",
+            url: `${input.target.appOrigin}${documentedPath(truth.objectId)}`,
+            ...(cookie === undefined ? {} : { identity: "fixture-a" }),
+          },
+          probe: {
+            method: "POST",
+            url: `${input.target.appOrigin}${aliasPath(truth.objectId)}`,
+            ...(cookie === undefined ? {} : { identity: "fixture-a" }),
+          },
         });
       }
     } else if (alias !== undefined) {

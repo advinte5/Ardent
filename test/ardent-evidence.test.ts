@@ -1,11 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import {
   EvidenceStore,
-  deriveOutcome,
   isEvidenceRecord,
+  outcomeForVerification,
   type EvidenceRecord,
   type EvidenceRejection,
 } from "../src/ardent/evidence";
+import { PROFILE_DIGESTS, type ProofProfileId, type ProfileVerdict } from "../src/ardent/verification";
+
+/**
+ * A profile verdict, exactly as `evaluateExperiment` produces one.
+ *
+ * P5 made promotion require one of these: a caller's `passed` boolean is no
+ * longer an input to the outcome, so every test that wants a finding promoted
+ * has to say WHICH profile judged the attempt and how. The digest is the real
+ * registered one, so a test cannot pass with a made-up profile.
+ */
+function verdict(
+  outcome: "supported" | "refuted" | "inconclusive",
+  profileId: ProofProfileId = "authorization-boundary",
+): ProfileVerdict {
+  return { profileId, profileDigest: PROFILE_DIGESTS[profileId], outcome, assertions: [], reasons: [] };
+}
 
 function store(persist?: (r: EvidenceRecord) => void) {
   return new EvidenceStore({ persist, now: () => 1_000 });
@@ -89,6 +105,9 @@ describe("EvidenceStore", () => {
         method: "reproduced",
         confidence: 0.95,
         proof: { observationIds: [obs.id] },
+        // P5: only a registered profile's verdict is a result. The capture is
+        // real, but promotion also needs a profile to have said it discriminates.
+        verdict: verdict("supported"),
       }),
     );
     expect(verified.verification.outcome).toBe("supported");
@@ -257,7 +276,7 @@ describe("verification cannot promote itself", () => {
     expect(s.renderFindings()).toContain("1 inconclusive");
   });
 
-  test("a captured negative result does refute", () => {
+  test("a captured negative result does refute — once a profile says so", () => {
     const s = store();
     const { finding } = candidate(s);
     const proof = captured(s, { source: "http-adapter", summary: "secured build returns 403" });
@@ -268,6 +287,7 @@ describe("verification cannot promote itself", () => {
         method: "reproduced against the secured build",
         confidence: 0.9,
         proof: { observationIds: [proof.id] },
+        verdict: verdict("refuted"),
       }),
     );
     expect(result.verification.outcome).toBe("refuted");
@@ -316,6 +336,7 @@ describe("verification cannot promote itself", () => {
         method: "payload reflected in the DOM and painted the marker",
         confidence: 0.9,
         proof: { observationIds: [proof.id], artifactIds: [shot.id] },
+        verdict: verdict("supported"),
       }),
     );
     expect(withBoth.verification.outcome).toBe("supported");
@@ -355,6 +376,7 @@ describe("verification cannot promote itself", () => {
         method: "replayed the captured exchange",
         confidence: 0.9,
         proof: { artifactIds: [capturedBytes.id] },
+        verdict: verdict("supported"),
       }),
     );
     expect(withCapturedFile.verification.outcome).toBe("supported");
@@ -374,12 +396,78 @@ describe("verification cannot promote itself", () => {
     }
   });
 
-  test("deriveOutcome refuses to upgrade anything short of captured proof", () => {
-    expect(deriveOutcome({ proofCount: 0, hasRuntimeProof: false, passed: true })).toBe("unvalidated");
-    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: false, passed: true })).toBe("unvalidated");
-    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: true, passed: true })).toBe("supported");
-    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: true, passed: true, inconclusive: true })).toBe("inconclusive");
-    expect(deriveOutcome({ proofCount: 1, hasRuntimeProof: true, passed: false })).toBe("refuted");
+  test("nothing short of captured proof is evaluated at all", () => {
+    const none = { profileId: "authorization-boundary", profileDigest: PROFILE_DIGESTS["authorization-boundary"] };
+    expect(outcomeForVerification({ proofCount: 0, hasRuntimeProof: false })).toBe("unvalidated");
+    expect(outcomeForVerification({ proofCount: 1, hasRuntimeProof: false })).toBe("unvalidated");
+    expect(outcomeForVerification({ proofCount: 1, hasRuntimeProof: false, ...none, recordedOutcome: "supported" })).toBe(
+      "unvalidated",
+    );
+  });
+
+  test("a caller's boolean is a CLAIM: real proof, no evaluation, no promotion", () => {
+    // The P5 rule. Before this, `passed: true` plus a citation the caller chose
+    // was `supported` — the capture was real, but nothing had checked that it
+    // DISCRIMINATED the claim.
+    expect(outcomeForVerification({ proofCount: 1, hasRuntimeProof: true })).toBe("claimed");
+    const s = store();
+    const { finding } = candidate(s);
+    const proof = captured(s, { source: "ardent_verify", summary: "I ran it and it worked" });
+    const result = must(
+      s.addVerification({
+        findingId: finding.id,
+        passed: true,
+        method: "reproduced",
+        confidence: 0.99,
+        proof: { observationIds: [proof.id] },
+      }),
+    );
+    expect(result.verification.outcome).toBe("claimed");
+    expect(result.verification.profileId).toBeUndefined();
+    expect(result.promoted).toBe(false);
+    expect(finding.status).toBe("candidate");
+    expect(s.verifiedFindings()).toHaveLength(0);
+  });
+
+  test("only a registered profile's verdict is a result", () => {
+    expect(
+      outcomeForVerification({
+        proofCount: 1,
+        hasRuntimeProof: true,
+        profileId: "authorization-boundary",
+        profileDigest: PROFILE_DIGESTS["authorization-boundary"],
+        recordedOutcome: "supported",
+      }),
+    ).toBe("supported");
+    expect(
+      outcomeForVerification({
+        proofCount: 1,
+        hasRuntimeProof: true,
+        profileId: "authorization-boundary",
+        profileDigest: PROFILE_DIGESTS["authorization-boundary"],
+        recordedOutcome: "refuted",
+      }),
+    ).toBe("refuted");
+    // An unregistered profile, or one whose definition has changed, cannot be
+    // re-evaluated under the current rule: the assessment is STALE, not reusable.
+    expect(
+      outcomeForVerification({
+        proofCount: 1,
+        hasRuntimeProof: true,
+        profileId: "not-a-profile",
+        profileDigest: "deadbeef",
+        recordedOutcome: "supported",
+      }),
+    ).toBe("inconclusive");
+    expect(
+      outcomeForVerification({
+        proofCount: 1,
+        hasRuntimeProof: true,
+        profileId: "authorization-boundary",
+        profileDigest: "old-version-digest",
+        recordedOutcome: "supported",
+      }),
+    ).toBe("inconclusive");
   });
 });
 
@@ -484,6 +572,7 @@ describe("EvidenceStore replay", () => {
         method: "reproduced",
         confidence: 0.9,
         proof: { observationIds: [obs.id] },
+        verdict: verdict("supported"),
       }),
     );
     return emitted;

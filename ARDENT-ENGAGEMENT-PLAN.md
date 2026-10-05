@@ -153,7 +153,7 @@ Not done: `bind` does not yet apply the drift check (only `start` does), and the
 
 Deliver P5 on the W01/W02 slice: register the ownership experiment, and add a fresh verification attempt that independently re-runs the captured exchange under a control — a `supported` verdict from a profile the investigator did not author, with no model-boolean promotion. Deterministic drivers first; model trials use the same commands, not a separate privileged execution path. P0 fixture work for W03–W16 can run alongside.
 
-### P5 progress: the evaluator is in, the wiring is not (2026-10-05)
+### P5: the proof-profile evaluator, and the wiring (2026-10-05)
 
 `src/ardent/verification.ts` implements the half of P5 that decides whether an
 attempt DISCRIMINATED a claim. It is pure — two captured exchanges plus the
@@ -174,16 +174,41 @@ The same profile serves both claim polarities: it answers "was the boundary
 crossed?" and the finding's `asserts` says which answer supports it, so neither
 polarity is a way to escape the other's evidence.
 
-**Not wired.** This is deliberately add-only and nothing in `src/` calls it yet,
-so the model boolean is still the promotion path. Wiring is a multi-file change
-with a real consequence to plan for: `EvidenceStore.addVerification` must make a
-profile verdict the ONLY route to `supported` (a caller's `passed` becomes a
-non-promoting `claimed` outcome), which removes the bare-boolean promotion the
-current eval scenarios and `eval/driver.ts` rely on. W09/W11/W13 and the W01/W02
-driver all have to reproduce through a profile instead — and W09's fixture is
-stateful, so its probe cannot simply be re-run after the run has already
-mutated the object. That rewiring is the next session's work, not a finishing
-touch: three scenarios, the driver, and the store invariant together.
+**Wired.** `ardent_verify` now takes no result from the model. Its parameters are
+the profile id and two EXCHANGES — `probe_*` and `control_*` (method, url,
+optional identity) — with no `passed` field and no way to supply proof: the tool
+registers an `ExperimentSpec` (durably, BEFORE running anything), runs the two
+exchanges through the bounded adapter as `origin: "runtime"` captures, and calls
+`evaluateExperiment`. The application decides; the caller cannot.
+
+Three points the wiring settled, each load-bearing:
+
+- **The control runs FIRST.** A control establishes the baseline a claim is
+  measured against, so a probe-first order would let the probe's own effect
+  contaminate the comparison — fatal for `guarded-transition`, whose claim is a
+  state change. W09's `final` route is idempotent, so re-running it is a genuine
+  fresh attempt rather than a second observation of the same mutation.
+- **`addVerification`'s `passed` is no longer an input to the outcome.**
+  `outcomeForVerification` replaces the old derivation: a profile verdict with a
+  matching digest is `supported`/`refuted`/`inconclusive`; real capture with no
+  profile is `claimed` — the bytes are real, but nothing has checked that they
+  DISCRIMINATE the claim — and no capture at all is `unvalidated`. A stale or
+  unknown profile digest re-derives as `inconclusive`, so an assessment is never
+  silently reused under a changed rule. `claimed` and `unvalidated` leave
+  `finding.status` untouched.
+- **Replay re-derives; it does not trust.** A verification record is re-checked
+  against the current rule on `replay`, so an old label the current profiles do
+  not support is downgraded rather than carried forward.
+
+The eval paths reproduce through profiles too — W01/W02 and W13
+(`authorization-boundary`), W11 (`route-comparison`), W09 (`guarded-transition`)
+— so the deterministic harness and a live run use the same commands and the same
+profile, not a separate privileged execution path.
+
+Suite after wiring: typecheck clean; **774 tests, 0 fail** (61 files). Eval
+`--trials 3`: 15/15 `as_expected`, exit 0, `verified findings: 9` and `verified
+negative conclusions: 3` — unchanged from before the wiring, which is the point:
+the profile reproduces the verdicts the fixture truth expects.
 
 ## Verified local gaps
 

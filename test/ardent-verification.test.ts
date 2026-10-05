@@ -201,7 +201,7 @@ describe("guarded-transition", () => {
       attempt: { probe: afterTransition, control: prerequisite },
     });
     expect(verdict.outcome).toBe("supported");
-    expect(verdict.assertions.find((a) => a.id === "probe.introduced_state_the_prerequisite_did_not")!.passed).toBe(true);
+    expect(verdict.assertions.find((a) => a.id === "probe.introduced_state_the_baseline_did_not")!.passed).toBe(true);
   });
 
   test("a prerequisite that was never accepted is inconclusive — the workflow was not exercised", () => {

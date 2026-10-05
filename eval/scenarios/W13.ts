@@ -76,8 +76,9 @@ async function run(input: ScenarioRunInput): Promise<ScenarioRunResult> {
     const truth = input.target.truth() as FixtureTruth;
     const ownObject = truth.objects.find((o) => o.owner === "A");
     const accountA = truth.accounts.find((a) => a.owner === "A");
-    if (ownObject === undefined || accountA === undefined) {
-      throw new Error("fixture seed did not assign an A-owned object and an A-owned account");
+    const accountB = truth.accounts.find((a) => a.owner === "B");
+    if (ownObject === undefined || accountA === undefined || accountB === undefined) {
+      throw new Error("fixture seed did not assign an A-owned object and both accounts");
     }
 
     await rt.bind(input.caseDef.objective);
@@ -86,6 +87,14 @@ async function run(input: ScenarioRunInput): Promise<ScenarioRunResult> {
       `${input.target.appOrigin}/login`,
       accountA.username,
       accountA.password,
+    );
+    // The control side of the reproduction runs as B: the owner. Without a
+    // session that CAN fetch the object, a refusal to A would prove nothing.
+    const cookieB = await rt.login(
+      "fixture-b",
+      `${input.target.appOrigin}/login`,
+      accountB.username,
+      accountB.password,
     );
 
     if (cookieA !== undefined) {
@@ -146,13 +155,25 @@ async function run(input: ScenarioRunInput): Promise<ScenarioRunResult> {
             observationIds: [probe.observation_id],
             asserts: "absent",
           });
-          if (conclusion !== undefined) {
+          if (conclusion !== undefined && cookieB !== undefined) {
+            // The reproduction the application runs: B fetches its own object
+            // first (establishing that the resource is real and reachable),
+            // then A attempts the same object. Both exchanges are the tool's own
+            // captures, so the negative conclusion rests on a difference rather
+            // than on an absence — and the profile, not the driver, decides.
             await rt.verify({
               findingId: conclusion,
-              passed: true,
-              method:
-                "authorized cross-account object read attempted with account A's session; captured exchange shows the refusal",
-              proofIds: [probe.observation_id],
+              profile: "authorization-boundary",
+              control: {
+                method: "GET",
+                url: `${input.target.appOrigin}/objects/${otherObject!.id}`,
+                identity: "fixture-b",
+              },
+              probe: {
+                method: "GET",
+                url: `${input.target.appOrigin}/objects/${otherObject!.id}`,
+                identity: "fixture-a",
+              },
               confidence: 0.9,
             });
           }

@@ -420,27 +420,41 @@ export async function runDeterministicTrial(opts: DriverOptions): Promise<TrialR
       const findingId = findOut.details?.finding_id;
       if (findingId !== undefined) {
         toolCalls += 1;
+        // `authorization-boundary`: the owner (B) fetches its own object first —
+        // the control that makes the crossing a difference rather than an
+        // assumption — then A attempts the same object. Both exchanges are the
+        // tool's own captures, and the application judges the claim.
         const verifyOut = (await toolOf(harness, "ardent_verify").execute(
           `${opts.trialId}-verify`,
           {
             finding_id: findingId,
-            passed: true,
-            method: "reproduced the cross-account read; the exchange is a runtime-origin capture",
-            proof_observation_ids: [proofId],
+            profile: "authorization-boundary",
+            control_method: "GET",
+            control_url: `${appOrigin}/objects/${protectedObject.id}`,
+            control_identity: "fixture-b",
+            probe_method: "GET",
+            probe_url: `${appOrigin}/objects/${protectedObject.id}`,
+            probe_identity: "fixture-a",
           },
           undefined,
           undefined,
           ctx,
-        )) as { details?: { outcome?: string; status?: string; code?: string } };
+        )) as { details?: { outcome?: string; status?: string; code?: string; attempt_id?: string } };
         traceEntry("evidence", {
           tool: "ardent_verify",
+          profile: "authorization-boundary",
           outcome: verifyOut.details?.outcome ?? null,
           status: verifyOut.details?.status ?? null,
           code: verifyOut.details?.code ?? null,
         });
         if (verifyOut.details?.outcome === "unvalidated") {
           notes.push(
-            "the verification attempt was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchange",
+            "the attempt was recorded unvalidated despite a runtime-origin capture, so the proof rule did not accept the captured exchanges",
+          );
+        }
+        if (verifyOut.details?.outcome === "inconclusive") {
+          notes.push(
+            "the profile could not discriminate the claim, so this is inconclusive rather than demonstrated",
           );
         }
       }

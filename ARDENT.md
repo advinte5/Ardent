@@ -87,58 +87,57 @@ can escape what argument inspection sees; host-only use remains supervised:
 - Findings must cite existing observation/artifact ids **and at least one of
   them**: an empty citation list is refused as `missing_citation`, a
   never-issued id as `foreign_reference`. Verification is recorded separately
-  and only promotes when the attempt cites records the harness captured
-  itself (`origin: "runtime"`), never on `passed: true` alone and never on a
-  model-authored note. Nothing promotes in v1 because no execution path writes
-  runtime-origin records yet — that is the HTTP adapter work. `/findings`
-  exposes the prototype's verified dispositions, not a guarantee of
-  exploitability.
+  and only promotes through a registered **proof profile**'s verdict: the
+  application runs the attempt's control and probe itself and judges the
+  captures, so neither a `passed` boolean, a model-authored note, nor a
+  caller-chosen citation can promote anything. `/findings` exposes the
+  prototype's verified dispositions, not a guarantee of exploitability.
 
-### Current verification gate: captured proof, not independently validated proof
+### Current verification gate: a registered proof profile, judged by the application
 
-`ardent_verify` takes `proof_observation_ids` / `proof_artifact_ids` alongside
-`passed` and `method`. A verdict now requires proof the **harness** captured:
-an observation recorded with `origin: "runtime"`, or a non-screenshot artifact
-written by the capture path. Everything else — a model's note, a bare boolean,
-a screenshot — records the attempt and moves nothing. **The store still does
-not inspect source bytes, enforce a fresh reproduction or control, or validate
-the cited claim.** Current behavior:
+`ardent_verify` takes the finding, a **profile id**, and two EXCHANGES — a
+`probe` and a `control` (method, url, optional identity). It carries **no
+`passed` field and no way to supply proof**: the tool registers the experiment,
+runs the control and then the probe through the bounded adapter as
+`origin: "runtime"` captures, and asks the application to judge them. The verdict
+is the profile's; the caller names actions and nothing else.
 
-| Proof cited | Claim | Recorded outcome | Finding status |
-| --- | --- | --- | --- |
-| none | `passed: true` | `unvalidated` | unchanged (still a candidate) |
-| model-authored note | `passed: true` | `unvalidated` | unchanged |
-| model-declared file artifact | `passed: true` | `unvalidated` | unchanged |
-| runtime-captured record | `passed: true` | `supported` | `verified` |
-| runtime-captured record | `passed: false` | `refuted` | `refuted` |
-| runtime-captured record | `inconclusive: true` | `inconclusive` | `inconclusive` |
-| screenshot-only | any | refused (`validation`) | unchanged |
+| What happened | Recorded outcome | Finding status |
+| --- | --- | --- |
+| profile ran, digest matches, boundary crossed (or not, per the claim) | `supported` | `verified` |
+| profile ran, digest matches, attempt refutes the claim | `refuted` | `refuted` |
+| profile ran but could not discriminate (no capture, failed setup, truncated bytes, unreachable/empty control) | `inconclusive` | `inconclusive` |
+| real capture, but no profile judged it | `claimed` | unchanged |
+| no capture at all | `unvalidated` | unchanged |
+| profile id unregistered, or its digest changed since | `inconclusive` (stale) | unchanged |
+| screenshot-only proof | refused (`validation`) | unchanged |
 
-**`ardent_request` is the path to the `verified` rows (P4).** It is the one
-tool that records a `runtime`-origin observation: its exchange is captured by
-the harness from bytes the harness received, so citing its id can support a
-finding. `ardent_note`, a bare boolean and a screenshot still cannot — `origin`
-defaults to `model` — so an attempt built only on those stays `unvalidated`. What
-is still missing is a **fresh** reproduction with a control and an independent
-proof profile: a `runtime` record says the harness captured *something*, not that
-the capture discriminates the claim. Until P5, treat a `verified` finding as
-proven to have occurred in a captured exchange, not as independently re-tested.
-Treat `/findings` accordingly.
+`supported` and `refuted` are the only promotions, and the only route to them is
+a profile the investigator did not author whose definition still matches its
+recorded digest. Three are registered: `authorization-boundary`,
+`route-comparison` and `guarded-transition`. Each REQUIRES a control, and
+incompleteness is `inconclusive` — never a refutation. `claimed` names the
+real-but-unjuged case honestly: the bytes are real, but nothing has checked that
+they DISCRIMINATE the claim, which is exactly the question a profile answers.
 
-Replay re-derives each imported attempt under this same rule and never
-upgrades a label, so a record written under weaker rules cannot come back as a
-verdict. Ids survive, which is what keeps a resumed session's citations
-resolving.
+**The gate closes the boolean hole but does not inspect source bytes itself.** It
+compares two captured exchanges under a fixed rule; it does not re-derive the
+claim's truth from the target's own semantics, and it is host-scoped. Treat a
+`verified` finding as "a registered profile judged a fresh control/probe pair as
+discriminating the claim", not as independently re-tested ground truth.
+`ardent_request` remains the recon path for a single captured exchange; it is no
+longer a route to `verified` on its own.
 
-The unvalidated attempt is still persisted — it happened, and the audit trail
-should show it — but it reaches neither `/findings` nor the `Verify …` todo,
-which stays open so a live lead is not buried behind a bare assertion.
+Replay re-derives each imported attempt under this same rule and never upgrades
+a label, so a record written under weaker rules cannot come back as a verdict,
+and a digest change downgrades an old assessment to `inconclusive`. Ids survive,
+which is what keeps a resumed session's citations resolving.
+
+The attempt that moved nothing is still persisted — it happened, and the audit
+trail should show it — but it reaches neither `/findings` nor the `Verify …`
+todo, which stays open so a live lead is not buried behind a bare assertion.
 `inconclusive` is its own status throughout: a test that could not discriminate
 is not a refutation, and the report says so.
-
-A `runtime`-origin record still only says the harness captured *something*.
-It does not establish that the capture is a deterministic signal for the claim
-it is cited against — that connection is what the P5 proof profile must add.
 
 Every refusal carries a typed code — `validation`, `missing_citation`,
 `foreign_reference`, `not_found` — that survives into the tool result's
@@ -895,13 +894,15 @@ number moved because a proof path now exists, not because a threshold was relaxe
   everything target-capable or evidence-writing is refused with `cancelled`
   until an operator runs `/ardent start` or `/ardent bind` deliberately. This
   is a visible block, not a demonstration that switching is safe.
-- **Promotion needs a captured exchange, not an assertion.** A verification
-  only carries a verdict when it cites proof the harness captured itself
-  (`origin: "runtime"` records, or a non-screenshot artifact written by the
-  capture path). `ardent_request` now supplies such records, so a finding can
-  reach `verified` — but only when the capture actually carries the signal. A
-  note, a bare `passed: true` or a screenshot still records an unvalidated
-  attempt, and a fresh independent reproduction with a control is still P5.
+- **Promotion needs a registered profile's verdict, not an assertion.** A
+  verification promotes only when a registered proof profile
+  (`authorization-boundary`, `route-comparison`, `guarded-transition`) judges a
+  fresh control/probe pair — both run and captured by the application — as
+  discriminating the claim. A `passed` boolean, a model-authored note and a
+  screenshot cannot promote anything, and an unregistered or changed profile
+  downgrades to `inconclusive`. The profile compares two captured exchanges; it
+  does not re-derive the claim's truth from the target's own semantics, and it
+  is host-scoped.
 - **Ids are unique per engagement, not globally.** `obs-1` in two engagements
   names two records; a path carries the engagement id, and reports must too.
 - **The P0 baseline is deterministic only.** No model or provider was involved,
@@ -927,13 +928,14 @@ number moved because a proof path now exists, not because a threshold was relaxe
    pinning checks in `test/ardent-evidence-ownership.test.ts`. Parallel workers
    are closed off by the lease (see "Concurrency"); pipelined serialized
    fan-out is the remaining opportunity.
-3. **Execution — captured HTTP done (P4); proof profile next.** The bounded
-   HTTP adapter, supplied identity references and captured exchanges are
-   delivered: `ardent_request` records a runtime-origin exchange, and W01 is now
-   graded `demonstrated`. Still missing is the fresh proof profile (experiment
-   registration, a control, an independent reproduction) — that is P5. Network
-   confinement/container execution is deferred beyond host-only v1; do not imply
-   the current gate supplies it.
+3. **Execution — captured HTTP (P4) and the proof profile (P5) are in.** The
+   bounded HTTP adapter supplies captured exchanges, and `ardent_verify` now
+   registers an experiment, runs a control and a probe through that adapter, and
+   has the application judge them against a registered profile — a model boolean
+   is no longer a promotion path. Still missing: experiment registration as a
+   first-class workflow (it is written by `ardent_verify`, not yet a standalone
+   `ardent_experiment` command), and network confinement/container execution,
+   deferred beyond host-only v1 — do not imply the current gate supplies it.
 4. **Long-term state — partly done.** Evidence and artifacts are per-engagement
    and replay on restart (`EngagementStore.evidenceFor`/`artifactsFor`). Still
    open: working-memory rehydration, an export/retest package, and a legacy-log

@@ -393,13 +393,26 @@ describe("free-pi-ardent extension", () => {
     expect(result.content[0]!.text).toContain("Rejected");
   });
 
-  test("ardent_verify records a bare claim as unvalidated and never promotes on a model note", async () => {
+  test("ardent_verify takes no assertion from the model: the profile's own capture decides", async () => {
     const { commandDefs, handlers, tools } = build(() => engagedConfig, {
       screenshotDir: mkdtempSync(join(tmpdir(), "ardent-shots-")),
       capture: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3]) }),
     });
     await handlers.get("session_start")![0]!({}, makeCtx());
     await startEngagement({ commandDefs });
+    const verify = tools.find((t) => t.name === "ardent_verify")!;
+
+    // P5: the model has no way to assert a result. The tool's parameters name a
+    // profile and two EXCHANGES; there is no `passed`, and no way to supply
+    // proof, because the application runs and captures both exchanges itself.
+    const schema = verify as unknown as { parameters?: { properties?: Record<string, unknown> } };
+    const fields = Object.keys(schema.parameters?.properties ?? {});
+    expect(fields).toContain("profile");
+    expect(fields).toContain("control_url");
+    expect(fields).not.toContain("passed");
+    expect(fields).not.toContain("proof_observation_ids");
+    expect(fields).not.toContain("proof_artifact_ids");
+
     const note = tools.find((t) => t.name === "ardent_note")!;
     const observed = (await note.execute(
       "call-note",
@@ -422,71 +435,32 @@ describe("free-pi-ardent extension", () => {
       undefined,
       makeCtx(),
     )) as { details: { finding_id: string } };
-    const verify = tools.find((t) => t.name === "ardent_verify")!;
 
-    const claimed = (await verify.execute(
-      "call-verify-unproven",
-      { finding_id: created.details.finding_id, passed: true, method: "reproduced" },
-      undefined,
-      undefined,
-      makeCtx(),
-    )) as {
-      content: Array<{ text: string }>;
-      details: { outcome?: string; promoted?: boolean; status?: string };
-    };
-    expect(claimed.content[0]!.text).toContain("unvalidated");
-    expect(claimed.details.outcome).toBe("unvalidated");
-    expect(claimed.details.promoted).toBe(false);
-    expect(claimed.details.status).toBe("candidate");
-
-    // The same claim with a citation is still the model's word: the note came
-    // from ardent_note, so it is model-authored proof, and a model-authored
-    // record cannot carry a verdict (plan checkpoint 4).
-    const cited = (await verify.execute(
-      "call-verify-cited",
+    // The exchanges the model names are refused by scope, so the harness
+    // captures nothing at all. The attempt RAN and could not discriminate:
+    // `inconclusive` — a real, reportable result that is specifically not a
+    // promotion. The model's note is never an input to the verdict.
+    const attempted = (await verify.execute(
+      "call-verify-nocapture",
       {
         finding_id: created.details.finding_id,
-        passed: true,
-        method: "reproduced",
-        proof_observation_ids: [observed.details.observation_id],
+        profile: "authorization-boundary",
+        probe_method: "GET",
+        probe_url: "http://192.0.2.10/admin",
+        control_method: "GET",
+        control_url: "http://192.0.2.10/admin",
       },
       undefined,
       undefined,
       makeCtx(),
     )) as {
       content: Array<{ text: string }>;
-      details: { outcome?: string; promoted?: boolean; status?: string };
+      details: { ok?: boolean; outcome?: string; promoted?: boolean; status?: string };
     };
-    expect(cited.details.outcome).toBe("unvalidated");
-    expect(cited.details.promoted).toBe(false);
-    expect(cited.details.status).toBe("candidate");
-    expect(cited.content[0]!.text).toContain("unvalidated");
-    expect(cited.content[0]!.text).toContain("harness-captured");
-
-    // A screenshot is captured by the harness but still cannot verify: it
-    // shows what rendered, not what executed.
-    const shot = tools.find((t) => t.name === "ardent_screenshot")!;
-    const captured = (await shot.execute(
-      "call-shot",
-      { url: "http://10.0.0.5/admin", description: "admin page painted" },
-      undefined,
-      undefined,
-      makeCtx(),
-    )) as { details: { artifact_id?: string } };
-    const withShot = (await verify.execute(
-      "call-verify-shot",
-      {
-        finding_id: created.details.finding_id,
-        passed: true,
-        method: "the page painted the marker",
-        proof_artifact_ids: [captured.details.artifact_id!],
-      },
-      undefined,
-      undefined,
-      makeCtx(),
-    )) as { content: Array<{ text: string }>; details: { outcome?: string; code?: string } };
-    expect(withShot.details.outcome).toBeUndefined();
-    expect(withShot.details.code).toBe("validation");
+    expect(attempted.details.outcome).toBe("inconclusive");
+    expect(attempted.details.promoted).toBe(false);
+    expect(attempted.details.status).toBe("inconclusive");
+    expect(attempted.content[0]!.text).toContain("inconclusive");
   });
 
   test("announces nothing at session start — the HUD strip is the only scope surface", async () => {

@@ -28,6 +28,7 @@ import type {
   Artifact,
   ArtifactKind,
   Confidence,
+  ExperimentSpec,
   Finding,
   FindingAssertion,
   FindingStatus,
@@ -42,6 +43,7 @@ import type {
   VerificationOutcome,
 } from "./types";
 import { findingAssertion, isRuntimeOrigin, maxSeverity } from "./types";
+import { isProofProfileId, PROFILE_DIGESTS, type ProfileVerdict } from "./verification";
 
 /** A maximal chain of `enables` edges, entry first. */
 export interface AttackPath {
@@ -92,7 +94,8 @@ export type EvidenceRecord =
   | { kind: "artifact"; value: Artifact }
   | { kind: "verification"; value: Verification }
   | { kind: "finding"; value: Finding }
-  | { kind: "relation"; value: Relation };
+  | { kind: "relation"; value: Relation }
+  | { kind: "experiment"; value: ExperimentSpec };
 
 const RECORD_KINDS: readonly EvidenceRecord["kind"][] = [
   "observation",
@@ -101,6 +104,7 @@ const RECORD_KINDS: readonly EvidenceRecord["kind"][] = [
   "verification",
   "finding",
   "relation",
+  "experiment",
 ];
 
 /**
@@ -142,18 +146,45 @@ export interface ReplayReport {
  * from the harness does a supplied `passed`/`inconclusive` decide the verdict —
  * and it still cannot upgrade an unvalidated claim.
  */
-export function deriveOutcome(input: {
+export function outcomeForVerification(input: {
   /** How many proof ids the attempt cited at all. */
   proofCount: number;
   /** True when at least one cited id is harness-captured proof. */
   hasRuntimeProof: boolean;
-  passed: boolean;
-  inconclusive?: boolean;
+  /**
+   * The registered profile that evaluated the attempt, when one did. Its
+   * presence is what makes an outcome a RESULT rather than a claim.
+   */
+  profileId?: string;
+  profileDigest?: string;
+  /** What the profile or the caller recorded, re-checked against the current rule. */
+  recordedOutcome?: VerificationOutcome;
 }): VerificationOutcome {
-  if (input.proofCount === 0) return "unvalidated";
-  if (!input.hasRuntimeProof) return "unvalidated";
-  if (input.inconclusive) return "inconclusive";
-  return input.passed ? "supported" : "refuted";
+  // A citation is still required before anything is accepted as a result: an
+  // attempt with no harness capture, or with only model-authored citations,
+  // cannot carry a verdict even when a profile ran. The one exception is a
+  // profile attempt that could not produce a capture at all — it RAN and could
+  // not discriminate, which is `inconclusive`, not a bare assertion.
+  if (input.proofCount === 0 || !input.hasRuntimeProof) {
+    return input.profileId !== undefined && input.recordedOutcome === "inconclusive" ? "inconclusive" : "unvalidated";
+  }
+  if (input.profileId !== undefined) {
+    // A recorded assessment is re-evaluated under the profile that produced it,
+    // and only while that profile is still the registered version. A profile
+    // change makes the old assessment STALE — `inconclusive` — rather than
+    // silently reusable, which is what the digest is recorded for.
+    const profile = isProofProfileId(input.profileId) ? input.profileId : undefined;
+    if (profile === undefined || PROFILE_DIGESTS[profile] !== input.profileDigest) return "inconclusive";
+    if (input.recordedOutcome === "refuted") return "refuted";
+    if (input.recordedOutcome === "inconclusive") return "inconclusive";
+    return "supported";
+  }
+  // No profile: this is a caller's own claim about its own capture. The bytes
+  // are real, but nothing has checked that they DISCRIMINATE the claim, and
+  // nothing stopped the caller citing the very exchange it wants to prove. It
+  // is recorded as `claimed` and moves the finding nowhere.
+  if (input.recordedOutcome === "inconclusive") return "inconclusive";
+  return "claimed";
 }
 
 /** Apply an outcome to a finding, leaving it untouched when nothing was proven. */
@@ -161,7 +192,8 @@ function applyOutcome(finding: Finding, outcome: VerificationOutcome): void {
   if (outcome === "supported") finding.status = "verified";
   else if (outcome === "refuted") finding.status = "refuted";
   else if (outcome === "inconclusive") finding.status = "inconclusive";
-  // `unvalidated` deliberately leaves `finding.status` untouched.
+  // `unvalidated` (no proof at all) and `claimed` (proof, but no profile judged
+  // it) both deliberately leave `finding.status` untouched: neither is a result.
 }
 
 export class EvidenceStore {
@@ -171,6 +203,8 @@ export class EvidenceStore {
   readonly verifications: Verification[] = [];
   readonly findings: Finding[] = [];
   readonly relations: Relation[] = [];
+  /** Registered experiments (P5). Durable: registration precedes execution. */
+  readonly experiments: ExperimentSpec[] = [];
 
   private readonly persist?: EvidencePersist;
   private readonly now: () => number;
@@ -348,11 +382,22 @@ export class EvidenceStore {
           }
           const proofObservationIds = record.value.proofIds.filter((id) => this.observations.some((o) => o.id === id));
           const proofArtifactIds = record.value.proofIds.filter((id) => this.artifacts.some((a) => a.id === id));
-          const outcome = deriveOutcome({
+          // Re-derived under the CURRENT rule, so a label earned under a weaker
+          // one is not resurrected: a verification with no profile becomes
+          // `claimed`, and one whose profile has changed version becomes stale
+          // (`inconclusive`) rather than silently reusable.
+          const outcome = outcomeForVerification({
             proofCount: record.value.proofIds.length,
             hasRuntimeProof: this.#hasRuntimeProof(proofObservationIds, proofArtifactIds),
-            passed: record.value.passed,
-            ...(record.value.outcome === "inconclusive" ? { inconclusive: true } : {}),
+            ...(record.value.profileId === undefined
+              ? {}
+              : { profileId: record.value.profileId, profileDigest: record.value.profileDigest }),
+            recordedOutcome:
+              record.value.profileId !== undefined
+                ? record.value.outcome
+                : record.value.outcome === "inconclusive"
+                  ? "inconclusive"
+                  : undefined,
           });
           const value: Verification = { ...record.value, outcome, proofIds: [...record.value.proofIds] };
           this.verifications.push(value);
@@ -530,19 +575,56 @@ export class EvidenceStore {
   }
 
   /**
+   * Register a bounded experiment before it runs (P5).
+   *
+   * Registration is the durable half of "the actions a run says it performed
+   * are the actions it registered": the spec is committed first, so the record
+   * of intent cannot be edited after the fact to match whatever happened.
+   */
+  addExperiment(input: {
+    findingId: string;
+    profileId: string;
+    profileDigest: string;
+    probe: { method: string; url: string; identity?: string };
+    control: { method: string; url: string; identity?: string };
+  }): { ok: true; experiment: ExperimentSpec } | EvidenceRejection {
+    if (!this.findings.some((f) => f.id === input.findingId)) {
+      return reject("not_found", `unknown finding id: ${input.findingId}`);
+    }
+    const value: ExperimentSpec = {
+      id: this.nextId("exp"),
+      ts: this.now(),
+      findingId: input.findingId,
+      profileId: input.profileId,
+      profileDigest: input.profileDigest,
+      probe: { ...input.probe },
+      control: { ...input.control },
+    };
+    const failure = this.commit({ kind: "experiment", value });
+    if (failure !== undefined) return failure;
+    this.experiments.push(value);
+    return { ok: true, experiment: value };
+  }
+
+  /**
    * Record a verification and apply its outcome to the linked finding.
    *
-   * The finding only moves when the attempt cites proof THE HARNESS CAPTURED.
-   * `passed: true` plus prose — or plus a model-authored note — is a model's
-   * say-so, not a result: it is recorded with outcome `unvalidated` and the
-   * finding stays exactly where it was, which is what stops a worker promoting
-   * its own candidate by asserting a boolean. A test that ran but could not
+   * The finding only moves when a REGISTERED PROOF PROFILE evaluated the
+   * attempt (`verdict`). A caller's own `passed` boolean is no longer an input
+   * to the outcome at all: with proof it records `claimed`, which moves nothing,
+   * because the bytes being real and the bytes DISCRIMINATING the claim are two
+   * different questions and only the profile answers the second. An attempt that
+   * cites no proof at all is `unvalidated`; one that ran but could not
    * discriminate is `inconclusive` — a real, reportable result that is
    * specifically not `refuted`.
    */
   addVerification(input: {
     findingId: string;
-    passed: boolean;
+    /**
+     * The caller's own claim. Retained for history, and NO LONGER an input to
+     * the outcome: with proof it records `claimed` and promotes nothing.
+     */
+    passed?: boolean;
     method: string;
     confidence: Confidence;
     notes?: string;
@@ -550,6 +632,13 @@ export class EvidenceStore {
     proof?: { observationIds?: string[]; artifactIds?: string[] };
     /** Set when the attempt ran but could not discriminate either way. */
     inconclusive?: boolean;
+    /**
+     * A registered profile's evaluation of this attempt. The ONLY route to
+     * `supported`, and therefore the only way a finding reaches `verified`.
+     */
+    verdict?: ProfileVerdict;
+    /** The experiment this attempt executed, when one was registered first. */
+    attemptId?: string;
   }):
     | { ok: true; verification: Verification; finding: Finding; promoted: boolean }
     | EvidenceRejection {
@@ -578,23 +667,36 @@ export class EvidenceStore {
         "a screenshot alone cannot carry a verification; cite the captured signal (DOM state, console output, request/response) as proof",
       );
     }
-    // The outcome is derived from provenance and proof, never from `passed`.
-    const outcome = deriveOutcome({
+    // The outcome comes from the profile that evaluated the attempt, or from
+    // the mere fact that proof was cited — never from a caller's boolean.
+    const recordedOutcome =
+      input.verdict !== undefined
+        ? input.verdict.outcome
+        : input.inconclusive === true
+          ? "inconclusive"
+          : undefined;
+    const outcome = outcomeForVerification({
       proofCount: proofIds.length,
       hasRuntimeProof: this.#hasRuntimeProof(proofObservationIds, proofArtifactIds),
-      passed: input.passed,
-      ...(input.inconclusive === undefined ? {} : { inconclusive: input.inconclusive }),
+      ...(input.verdict === undefined
+        ? {}
+        : { profileId: input.verdict.profileId, profileDigest: input.verdict.profileDigest }),
+      ...(recordedOutcome === undefined ? {} : { recordedOutcome }),
     });
     const value: Verification = {
       id: this.nextId("ver"),
       ts: this.now(),
       findingId: finding.id,
-      passed: input.passed,
+      passed: input.passed ?? outcome === "supported",
       method: input.method,
       confidence: clamp01(input.confidence),
       outcome,
       proofIds,
       ...(input.notes === undefined ? {} : { notes: input.notes }),
+      ...(input.verdict === undefined
+        ? {}
+        : { profileId: input.verdict.profileId, profileDigest: input.verdict.profileDigest }),
+      ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
     };
     const failure = this.commit({ kind: "verification", value });
     if (failure !== undefined) return failure;

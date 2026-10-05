@@ -19,10 +19,13 @@
 //
 // Three properties are load-bearing, and each is a refusal rather than a score:
 //
-//   • A CONTROL IS REQUIRED. A denial proves nothing on its own — 404 is also
-//     what a typo returns. Every profile here needs a second exchange showing
-//     the thing under test is real and reachable, so that the probe's outcome
-//     is a difference rather than an absence.
+//   • A CONTROL IS REQUIRED, AND IT RUNS FIRST. A denial proves nothing on its
+//     own — 404 is also what a typo returns. Every profile here needs a second
+//     exchange showing the thing under test is real and reachable, so that the
+//     probe's outcome is a difference rather than an absence. The ORDER is part
+//     of the contract: the control establishes the baseline, and running the
+//     probe first would let the probe's own effect contaminate it — which would
+//     make a state-change claim unfalsifiable rather than merely unproven.
 //   • INCOMPLETE IS `inconclusive`, NEVER `refuted`. A missing capture, a
 //     truncated body, an unreachable control or an ambiguous one cannot refute
 //     a claim; they mean the attempt could not discriminate. Reporting that as
@@ -316,7 +319,7 @@ const PROFILE_DEFINITIONS: Record<ProofProfileId, ProfileDefinition> = {
     version: 1,
     title: "A guarded state transition completes without its prerequisite",
     requires:
-      "A probe that attempts the guarded transition without the required prerequisite, and a control that performs the required prerequisite itself. The control must SUCCEED — it establishes the workflow is live and gives the pre-transition baseline that makes the probe's new content a state change rather than a constant.",
+      "A probe that attempts the guarded transition WITHOUT the required prerequisite, and a control READ of the same resource that runs first. The control must be reached, and it is what makes the probe's new content a state change rather than a constant: if the baseline already carried the state the probe claims to reach, the transition changed nothing. Do not satisfy the prerequisite to build the control — that would make the probe legitimate.",
     evaluate: (attempt, claim) => {
       const assertions: AssertionResult[] = [];
       const reasons: string[] = [];
@@ -329,11 +332,11 @@ const PROFILE_DEFINITIONS: Record<ProofProfileId, ProfileDefinition> = {
       const probeReached = probeCaptured && reached(attempt.probe.status);
 
       assertions.push({
-        id: "control.prerequisite_accepted",
+        id: "control.baseline_reached",
         passed: controlReached,
         detail: controlReached
-          ? `the required prerequisite was accepted with HTTP ${attempt.control.status}, so the workflow is live and this is its pre-transition baseline`
-          : `the required prerequisite was not accepted (HTTP ${attempt.control.status ?? "no response"}), so the workflow was never exercised and a later transition proves nothing`,
+          ? `the baseline read reached the resource with HTTP ${attempt.control.status}, so it is live and its content is the pre-transition comparison`
+          : `the baseline read did not reach the resource (HTTP ${attempt.control.status ?? "no response"}), so a later transition has nothing to be a change FROM`,
       });
       assertions.push({
         id: "probe.transition_completed",
@@ -351,18 +354,18 @@ const PROFILE_DEFINITIONS: Record<ProofProfileId, ProfileDefinition> = {
       const newContent =
         probeCaptured && controlReached ? tokenOnlyIn(attempt.probe.body, attempt.control.body) : undefined;
       assertions.push({
-        id: "probe.introduced_state_the_prerequisite_did_not",
+        id: "probe.introduced_state_the_baseline_did_not",
         passed: newContent !== undefined,
         detail:
           newContent === undefined
-            ? "the guarded transition introduced no distinctive content the prerequisite had not already returned, so no state change is shown"
-            : `the guarded transition introduced distinctive content (${newContent.slice(0, 12)}…) absent from the prerequisite response, so it changed state the prerequisite did not`,
+            ? "the guarded transition introduced no distinctive content the baseline read had not already returned, so no state change is shown"
+            : `the guarded transition introduced distinctive content (${newContent.slice(0, 12)}…) absent from the baseline, so it reached state the baseline did not`,
       });
 
       const complete = probeCaptured && controlReached;
       const violated = probeReached && newContent !== undefined;
       if (!complete) {
-        reasons.push("the prerequisite control did not run cleanly");
+        reasons.push("the baseline control did not run cleanly");
         reasons.push("inconclusive: the attempt could not discriminate the claim");
         return { outcome: "inconclusive", assertions, reasons };
       }
