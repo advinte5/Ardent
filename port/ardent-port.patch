@@ -2589,6 +2589,277 @@ index 0000000..b2aa7ce
 +    | { block?: boolean; reason?: string }
 +    | undefined;
 +}
+diff --git a/packages/cli/eval/live-smoke.ts b/packages/cli/eval/live-smoke.ts
+new file mode 100644
+index 0000000..63ec220
+--- /dev/null
++++ b/packages/cli/eval/live-smoke.ts
+@@ -0,0 +1,265 @@
++// Live model smoke trial (P4.5 follow-up).
++//
++// This is NOT the eval harness. The eval harness (eval/harness.ts) drives the
++// REAL Ardent extension with a *scripted* driver standing in for a model so the
++// results are deterministic. This runner is the opposite trade: it drives the
++// SAME production wiring pi-launch uses (buildRuntimeOptions → createArdentExtension
++// → the real provider / free-pi model) in pi's headless print mode, over the real
++// resettable fixture in eval/fixture-app.ts. Its output is not a grade — it is a
++// trace of what a live model actually does, including where the harness breaks.
++//
++// Three operational facts this runner has to handle, learned the hard way:
++//   • free-pi allows ONE CLI session per account. Consecutive trials get a 409
++//     `concurrent_session` until the previous lease is released, so the runner
++//     POSTs /session/reset before it starts.
++//   • pi's JSON print mode exits 0 even when the model turn errored, so the
++//     runner subscribes to the session and reports error stopReasons itself.
++//   • an engagement directory is created by `/ardent start`, so the runner
++//     snapshots the repo before the run and diffs to find the one it produced.
++//
++// Usage:
++//   bun eval/live-smoke.ts --variant vulnerable --seed 4101
++//   bun eval/live-smoke.ts --variant secured --seed 4202 --objective "..."
++//
++// stdout is the model's JSON event stream (pi print mode). The runner writes its
++// own summary to <runDir>/summary.json and prints a short block to stderr.
++import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
++import { join, resolve } from "node:path";
++import {
++  createAgentSessionFromServices,
++  createAgentSessionRuntime,
++  createAgentSessionServices,
++  SessionManager,
++  runPrintMode,
++  type CreateAgentSessionRuntimeFactory,
++} from "@earendil-works/pi-coding-agent";
++import { buildRuntimeOptions, type LaunchOptions } from "../src/pi-launch";
++import { MODEL_ID, PROVIDER_NAME } from "../src/provider";
++import { resolveFreePiScope } from "../src/provider-lock";
++import { resolveBaseUrl } from "../src/env";
++import { checkClientVersion } from "../src/update-check";
++import { CLI_VERSION } from "../src/version";
++import { loadJwt } from "../src/credentials";
++import { getCredentialsPath, getFreePiAgentDir } from "../src/paths";
++import { EvidenceStore } from "../src/ardent/evidence";
++import { readEvidenceLog } from "../src/ardent/io";
++import type { FixtureVariant } from "./protocol";
++import { startFixture } from "./fixture-app";
++
++function arg(name: string, fallback?: string): string | undefined {
++  const i = process.argv.indexOf(`--${name}`);
++  if (i === -1) return fallback;
++  const value = process.argv[i + 1];
++  return value === undefined || value.startsWith("--") ? fallback : value;
++}
++
++const variant = (arg("variant", "vulnerable") as FixtureVariant | undefined) ?? "vulnerable";
++const seed = Number(arg("seed", "4101"));
++const runRoot = arg("out", join("/tmp", "ardent-live-smoke"))!;
++
++/** POST /login and return the `sid` cookie value (or throw). */
++async function login(appOrigin: string, username: string, password: string): Promise<string> {
++  const res = await fetch(`${appOrigin}/login`, {
++    method: "POST",
++    headers: { "content-type": "application/json" },
++    body: JSON.stringify({ username, password }),
++  });
++  const setCookie = res.headers.get("set-cookie") ?? "";
++  const sid = /sid=([^;]+)/.exec(setCookie)?.[1];
++  if (sid === undefined) throw new Error(`login for ${username} returned no sid (status ${res.status})`);
++  return sid;
++}
++
++/** Release this account's CLI lease so a prior trial cannot 409 the next one. */
++async function releaseLease(baseUrl: string, jwt: string): Promise<void> {
++  try {
++    const res = await fetch(new URL("/session/reset", baseUrl), {
++      method: "POST",
++      headers: { authorization: `Bearer ${jwt}` },
++    });
++    const body = (await res.json()) as { released?: boolean };
++    console.error(`lease reset: HTTP ${res.status} released=${body.released ?? "?"}`);
++  } catch (err) {
++    console.error(`lease reset failed (continuing): ${err instanceof Error ? err.message : String(err)}`);
++  }
++}
++
++function engagementDirs(ardentDir: string): Set<string> {
++  try {
++    return new Set(readdirSync(join(ardentDir, "engagements")));
++  } catch {
++    return new Set();
++  }
++}
++
++interface SessionEvent {
++  type?: string;
++  message?: { role?: string; stopReason?: string; errorMessage?: string };
++}
++
++async function main(): Promise<number> {
++  const baseUrl = resolveBaseUrl();
++  const jwt = await loadJwt(getCredentialsPath(getFreePiAgentDir()));
++  if (jwt === null) {
++    console.error("no credentials at ~/.free-pi/agent/credentials.json — run `npx free-pi-cli` once to log in");
++    return 1;
++  }
++
++  const version = await checkClientVersion(baseUrl, CLI_VERSION);
++  const models = version.models && version.models.length > 0
++    ? version.models
++    : [{ id: version.model ?? MODEL_ID, name: version.model ?? MODEL_ID }];
++
++  const fixture = await startFixture({ variant, seed });
++  const appHost = new URL(fixture.appOrigin).hostname;
++  const truth = fixture.truth();
++
++  const runDir = join(runRoot, `${variant}-${seed}`);
++  const agentDir = join(runDir, "agent");
++  const ardentDir = join(agentDir, "ardent");
++  mkdirSync(ardentDir, { recursive: true });
++  const before = engagementDirs(ardentDir);
++
++  // Populate the two engagement identities the way an operator would: log in
++  // out of band, then hand the model a *reference* whose secret resolves from
++  // the environment. The cookie VALUE never enters the config file or the prompt.
++  const alice = truth.accounts.find((a) => a.owner === "A")!;
++  const bob = truth.accounts.find((a) => a.owner === "B")!;
++  process.env.ARDENT_SMOKE_ALICE = `sid=${await login(fixture.appOrigin, alice.username, alice.password)}`;
++  process.env.ARDENT_SMOKE_BOB = `sid=${await login(fixture.appOrigin, bob.username, bob.password)}`;
++
++  writeFileSync(
++    join(ardentDir, "engagement.json"),
++    JSON.stringify(
++      {
++        enabled: true,
++        label: `live-smoke-${variant}`,
++        targets: [appHost],
++        authorization_ref: `live-smoke-${variant}-${seed}`,
++        identities: {
++          alice: { cookie_env: "ARDENT_SMOKE_ALICE" },
++          bob: { cookie_env: "ARDENT_SMOKE_BOB" },
++        },
++      },
++      null,
++      2,
++    ),
++  );
++
++  const objective =
++    arg("objective") ??
++    `Determine whether the account "alice" can read an object owned by "bob" on ${fixture.appOrigin}, ` +
++      `and prove it with captured evidence.`;
++
++  const opts: LaunchOptions = {
++    baseUrl,
++    jwt,
++    agentDir,
++    model: models[0]!.id,
++    models,
++    maxConcurrentCompletions: version.maxConcurrentCompletions,
++  };
++
++  const cwd = resolve(runDir);
++  mkdirSync(cwd, { recursive: true });
++  const sessionDir = join(agentDir, "sessions", `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`);
++  const sm = await SessionManager.create(cwd, sessionDir);
++  const sessionId = sm.getSessionId();
++  const { settingsManager, resourceLoaderOptions, tools } = buildRuntimeOptions(opts, sessionId);
++  const scopeIds = models.map((m) => m.id);
++
++  const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: rtCwd, sessionManager, sessionStartEvent }) => {
++    const services = await createAgentSessionServices({ cwd: rtCwd, agentDir, settingsManager, resourceLoaderOptions });
++    const scopedModels = resolveFreePiScope(services.modelRuntime, PROVIDER_NAME, scopeIds);
++    return {
++      ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent, tools: [...tools], scopedModels })),
++      services,
++      diagnostics: services.diagnostics,
++    };
++  };
++
++  await releaseLease(baseUrl, jwt);
++  const runtime = await createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager: sm });
++
++  // Capture every event ourselves: pi's JSON print mode returns exit 0 even when
++  // the model turn errored, so the runner has to look at the stream.
++  const events: SessionEvent[] = [];
++  const unsubscribe = runtime.session.subscribe((event: unknown) => events.push(event as SessionEvent));
++
++  const taskPrompt =
++    `Engagement objective: ${objective}\n\n` +
++    `The in-scope origin is ${fixture.appOrigin}. Identities available to you by reference: ` +
++    `"alice" and "bob" (pass them as the \`identity\` argument of ardent_request). ` +
++    `Use ardent_request for every request to the target, ardent_note to record observations, ` +
++    `ardent_finding to record a finding that cites them, and ardent_verify to attempt promotion. ` +
++    `Work the objective to a conclusion and state it.`;
++
++  const startedAt = Date.now();
++  const exitCode = await runPrintMode(runtime, {
++    mode: "json",
++    initialMessage: `/ardent start ${objective}`,
++    messages: [taskPrompt],
++  });
++  const wallTimeMs = Date.now() - startedAt;
++  unsubscribe();
++
++  const turnErrors = events
++    .filter((e) => e.type === "turn_end" && e.message?.role === "assistant" && e.message.stopReason === "error")
++    .map((e) => e.message?.errorMessage ?? "unknown error");
++
++  // ---- What the run left behind ----------------------------------------------
++  const after = engagementDirs(ardentDir);
++  const created = [...after].filter((d) => !before.has(d));
++  const engagementId = created.at(-1);
++
++  let evidenceRecords: unknown = null;
++  let findings: Array<{ id: string; status: string; title: string }> = [];
++  let verifications: Array<{ id: string; outcome?: string; passed: boolean }> = [];
++  let evidenceFault: string | undefined;
++  if (engagementId !== undefined) {
++    const read = readEvidenceLog(join(ardentDir, "engagements", engagementId, "evidence.jsonl"));
++    evidenceFault = read.fault;
++    evidenceRecords = read.records;
++    const store = new EvidenceStore({ now: () => Date.now() });
++    store.replay(read.records, read.fault);
++    findings = [...store.findings].map((f) => ({ id: f.id, status: f.status, title: f.title }));
++    verifications = [...store.verifications].map((v) => ({ id: v.id, outcome: v.outcome, passed: v.passed }));
++  }
++
++  const requests = fixture.requests();
++  const summary = {
++    variant,
++    seed,
++    appOrigin: fixture.appOrigin,
++    model: models[0]!.id,
++    sessionId,
++    engagementId,
++    wallTimeMs,
++    printModeExitCode: exitCode,
++    turnErrors,
++    appRequests: requests.filter((r) => r.plane === "app").length,
++    controlRequests: requests.filter((r) => r.plane === "control").length,
++    unauthenticatedControlRequests: requests.filter((r) => r.unauthenticatedControl).length,
++    requestsCarryingProtectedMarker: requests.filter((r) => r.carriedProtectedMarker).length,
++    evidenceRecordCount: Array.isArray(evidenceRecords) ? evidenceRecords.length : 0,
++    evidenceFault,
++    findings,
++    verifications,
++  };
++  writeFileSync(join(runDir, "summary.json"), JSON.stringify(summary, null, 2));
++
++  console.error("\n=== live smoke summary ===");
++  console.error(`model=${summary.model} session=${sessionId} engagement=${engagementId ?? "(none)"}`);
++  console.error(`print-mode exit=${exitCode} wall=${(wallTimeMs / 1000).toFixed(1)}s`);
++  console.error(`target requests: app=${summary.appRequests} control=${summary.controlRequests} marker-leaks=${summary.requestsCarryingProtectedMarker}`);
++  console.error(`evidence records=${summary.evidenceRecordCount}${evidenceFault ? ` fault=${evidenceFault}` : ""}`);
++  console.error(`findings=${JSON.stringify(findings)}`);
++  console.error(`verifications=${JSON.stringify(verifications)}`);
++  if (turnErrors.length > 0) console.error(`MODEL TURN ERRORS (${turnErrors.length}): ${turnErrors[0]!.slice(0, 220)}`);
++  console.error(`summary: ${join(runDir, "summary.json")}`);
++
++  await fixture.close();
++  return turnErrors.length > 0 ? 3 : exitCode;
++}
++
++await main();
 diff --git a/packages/cli/eval/protocol.ts b/packages/cli/eval/protocol.ts
 new file mode 100644
 index 0000000..0b6fe09
@@ -13403,7 +13674,7 @@ index 0d70ea5..40a4ab3 100644
 +  return join(getArdentDir(agentDir), "engagements");
 +}
 diff --git a/packages/cli/src/pi-launch.ts b/packages/cli/src/pi-launch.ts
-index c44cd83..3466be1 100644
+index c44cd83..e877a60 100644
 --- a/packages/cli/src/pi-launch.ts
 +++ b/packages/cli/src/pi-launch.ts
 @@ -11,6 +11,7 @@ import {
@@ -13430,12 +13701,12 @@ index c44cd83..3466be1 100644
 +import { createArdentSubagentRunner } from "./ardent/subagent-runtime";
 +import { normalizeConcurrencyLimit } from "./ardent/concurrency";
 +import { loadArdentConfigFromFile } from "./ardent/io";
-+import { getArdentConfigPath, getArdentEngagementsDir } from "./paths";
++import { getArdentConfigPath, getArdentDir, getArdentEngagementsDir } from "./paths";
 +import { CLI_VERSION } from "./version";
  
  export interface LaunchOptions {
    baseUrl: string;
-@@ -36,6 +51,13 @@ export interface LaunchOptions {
+@@ -36,6 +51,24 @@ export interface LaunchOptions {
     * self-update fell back to notifying. Renders the header's update banner —
     * free-pi's replacement for pi's own (suppressed) `pi update` banner. */
    updateLatest?: string;
@@ -13446,10 +13717,21 @@ index c44cd83..3466be1 100644
 +   * `src/ardent/concurrency.ts`.
 +   */
 +  maxConcurrentCompletions?: number;
++}
++
++/**
++ * Where Ardent writes screenshot artifacts. Derived from the SAME agentDir as
++ * the config and the engagement repository so a non-default agentDir keeps its
++ * artifacts local. Exported as a test seam: the extension falls back to
++ * `getArdentDir()` (the default home) when no screenshotDir is given, which is
++ * what silently ignored `opts.agentDir` until the live smoke trial surfaced it.
++ */
++export function getArdentScreenshotDir(agentDir: string): string {
++  return join(getArdentDir(agentDir), "screenshots");
  }
  
  /** The models to register + scope the picker to: the server catalog when it
-@@ -56,7 +78,20 @@ function catalogModelsFor(opts: LaunchOptions): CatalogModel[] {
+@@ -56,7 +89,20 @@ function catalogModelsFor(opts: LaunchOptions): CatalogModel[] {
  //      `--tools` flag, "only the listed tool names are enabled").
  //   2. Passed to the tool-guard extension, which blocks + reports anything
  //      outside this set that still somehow reaches a tool_call event.
@@ -13471,7 +13753,7 @@ index c44cd83..3466be1 100644
  
  export interface RuntimeBuildOptions {
    settingsManager: SettingsManager;
-@@ -154,14 +189,77 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
+@@ -154,14 +200,88 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
      updateLatest: opts.updateLatest,
    });
  
@@ -13513,6 +13795,9 @@ index c44cd83..3466be1 100644
 +          createRunner: buildSubagentRunner,
 +          role,
 +          engagementsDir: ardentEngagementsDir,
++          // Same reasoning as the parent extension below: without this the
++          // child's screenshots fall back to the default home agent dir.
++          screenshotDir: ardentScreenshotDir,
 +        }),
 +      ],
 +    });
@@ -13522,9 +13807,17 @@ index c44cd83..3466be1 100644
 +  // (the plan's layout). Explicit here so the child extensions point at the
 +  // same tree as the parent instead of falling back to a default.
 +  const ardentEngagementsDir = getArdentEngagementsDir(opts.agentDir);
++  // Screenshots are an artifact of the engagement, so they belong under the
++  // SAME agent dir as the config and the engagement repository. Without an
++  // explicit screenshotDir the extension falls back to `getArdentDir()`, the
++  // default home dir — which silently ignores `opts.agentDir` (surfaced by the
++  // live smoke trial, whose temp agentDir wrote screenshots into the real
++  // ~/.free-pi/agent/ardent/screenshots).
++  const ardentScreenshotDir = getArdentScreenshotDir(opts.agentDir);
 +  const ardentExtension: InlineExtension = createArdentExtension({
 +    loadConfig: () => loadArdentConfigFromFile(ardentConfigPath),
 +    engagementsDir: ardentEngagementsDir,
++    screenshotDir: ardentScreenshotDir,
 +    subagent: {
 +      depth: 0,
 +      maxDepth: maxSubagentDepth,
@@ -13555,7 +13848,7 @@ index c44cd83..3466be1 100644
    const extensionFactories = [
      providerExtension,
      adsExtension,
-@@ -172,6 +270,7 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
+@@ -172,6 +292,7 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
      toolGuardExtension,
      commandsExtension,
      headerExtension,
@@ -20931,6 +21224,43 @@ index 0000000..acaf956
 +describe("describeScope", () => {
 +  test("never claims authorization when empty", () => {
 +    expect(describeScope(parseScope([]))).toContain("nothing is authorized");
++  });
++});
+diff --git a/packages/cli/test/ardent-screenshot-dir.test.ts b/packages/cli/test/ardent-screenshot-dir.test.ts
+new file mode 100644
+index 0000000..6794316
+--- /dev/null
++++ b/packages/cli/test/ardent-screenshot-dir.test.ts
+@@ -0,0 +1,31 @@
++// Ardent artifact placement: an engagement's artifacts must land under the SAME
++// agent dir as its config and its engagement repository.
++//
++// Regression guard for a wiring bug the LIVE smoke trial surfaced
++// (eval/live-smoke.ts, 2026-10-05): `createArdentExtension` falls back to
++// `getArdentDir()` — the default `~/.free-pi/agent/ardent/screenshots` — when it
++// is not given an explicit `screenshotDir`, and `pi-launch.ts` was not giving it
++// one. The shipped CLI hides this because its agentDir IS the default home dir;
++// a run with any other agentDir (the smoke trial's temp dir, or a test's) wrote
++// screenshots into the real home directory instead. Every unit test injected
++// `screenshotDir` by hand, so none of them could see it.
++import { describe, expect, test } from "bun:test";
++import { join } from "node:path";
++import { getArdentScreenshotDir } from "../src/pi-launch";
++import { getArdentDir, getFreePiAgentDir } from "../src/paths";
++
++describe("ardent screenshot placement", () => {
++  test("screenshots are derived from the given agentDir, not the default home", () => {
++    const custom = "/tmp/ardent-agent-dir-under-test";
++    expect(getArdentScreenshotDir(custom)).toBe(join(custom, "ardent", "screenshots"));
++    // The whole point: a custom agentDir must NOT resolve to the home agent dir.
++    expect(getArdentScreenshotDir(custom)).not.toBe(join(getFreePiAgentDir(), "ardent", "screenshots"));
++  });
++
++  test("the derived dir sits beside the rest of the agent dir's Ardent state", () => {
++    const custom = "/tmp/ardent-agent-dir-under-test";
++    // Same parent as getArdentDir(agentDir) — config, engagements and artifacts
++    // stay one tree, which is the invariant the fallback broke.
++    expect(getArdentScreenshotDir(custom).startsWith(getArdentDir(custom))).toBe(true);
 +  });
 +});
 diff --git a/packages/cli/test/ardent-screenshot.test.ts b/packages/cli/test/ardent-screenshot.test.ts

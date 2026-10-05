@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T15:56:33Z
+# Generated: 2026-10-05T18:56:45Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -13,7 +13,7 @@
 status    sha256                                                            monorepo path
 new       7d9a087b074e725466caff2b5462bde4610cd23b5ed93c9e0d4feb2f80f7d6e6  packages/cli/ARDENT.md
 modified  90756ddac24c9ac369cb8e5b3cb89147099160161cfc067773a153e0d2685649  packages/cli/src/paths.ts
-modified  550711064f6d8ccadd404d0479d022cdb3c013a814a2c23606fc11c3c6bfc732  packages/cli/src/pi-launch.ts
+modified  43e7a230357c21393a482617a7db807ee6fa96addf08b9d2eeb077525e04f288  packages/cli/src/pi-launch.ts
 modified  72d8ccf16030d1562e6c509975287283fb89b9feaf6e3dc8da450b7a8d292a9d  packages/cli/src/provider.ts
 modified  2f58353b4ba5d29709e5265f42de192246114e9fa5dc454c235acd75eed5bc7c  packages/cli/src/onboarding.ts
 modified  4eb8ad8e33183ea3f90065544c1ca31debde8a034cbb105e31d698203d2b1649  packages/cli/src/header.ts
@@ -55,6 +55,7 @@ new       e8f6119a17eaa7dbe52bcec8862277e4f1ab0b7e69f6d94bfd456b1f57f913ab  pack
 new       1f101d71713da55c807765830ab4d8fc8535d74fa9f7b36eb514446b55952d5b  packages/cli/eval/fixture-app.ts
 new       79426565a55effd7f7a42fb7f65bbd08676c39288f46cf177d5a56268a021bdd  packages/cli/eval/grader.ts
 new       4165306455c800f8047b871e900411380e43e33c4d610b18e112ef05f9ee28ce  packages/cli/eval/harness.ts
+new       0746a42ae13fc5943f166d88ea698e6fc7443d006db0f6f0a61e6ea29f7eba9f  packages/cli/eval/live-smoke.ts
 new       73685492b4c8ef4b1d98650f5cc9e0df0f0d4482fa3c91f00bb286a0c06bd50b  packages/cli/eval/protocol.ts
 new       2efc1ac8848193184d94e222805e05ee62ae6286c601f2687f78de6cc4af1f74  packages/cli/eval/runner.ts
 new       8507101cb2d86ca048b2186b69f7fbca47c2723d07a91ec4a41a0002399bcf2c  packages/cli/test/ardent-application.test.ts
@@ -81,6 +82,7 @@ new       fe3afff17de942c5467a6f3992674cb9cea892d8bc90b1976cbb1266e3112d42  pack
 new       201bcdbd3f50a672e7d036130630fd6b3fcd4282c7093e57d733f2fac5ec618d  packages/cli/test/ardent-request-tool.test.ts
 new       52f528428df88441fd50d90e3f2eb7cc20c0d0ce7030d40f925e45f9fb5a0ebe  packages/cli/test/ardent-roles.test.ts
 new       736c71e1c254d8bd6858c3b5e3f466bf9adec7dcd910f75d288ece1d06f2d37e  packages/cli/test/ardent-scope.test.ts
+new       9f9be3e9f332602814357d30f401475d22f1801474a1f90cbc6d55b0858860ad  packages/cli/test/ardent-screenshot-dir.test.ts
 new       fadc3dd7c31c3efece26f7510bf5701edd1e1820efcc6e67a67e82a57fd959d5  packages/cli/test/ardent-screenshot.test.ts
 new       efb6993fa89d5f24d5442f345185861fbd774b23cd7681169ffc51811d7eabf2  packages/cli/test/ardent-subagent-runtime.test.ts
 new       a4bcc4cba2f30c487adfb2f38277ee4fc0f229a83dc887604d07114cec60cace  packages/cli/test/ardent-subagent-tool.test.ts

@@ -34,7 +34,7 @@ import { DEFAULT_MAX_SUBAGENT_DEPTH, canSpawnFrom, type SubagentRunner } from ".
 import { createArdentSubagentRunner } from "./ardent/subagent-runtime";
 import { normalizeConcurrencyLimit } from "./ardent/concurrency";
 import { loadArdentConfigFromFile } from "./ardent/io";
-import { getArdentConfigPath, getArdentEngagementsDir } from "./paths";
+import { getArdentConfigPath, getArdentDir, getArdentEngagementsDir } from "./paths";
 import { CLI_VERSION } from "./version";
 
 export interface LaunchOptions {
@@ -58,6 +58,17 @@ export interface LaunchOptions {
    * `src/ardent/concurrency.ts`.
    */
   maxConcurrentCompletions?: number;
+}
+
+/**
+ * Where Ardent writes screenshot artifacts. Derived from the SAME agentDir as
+ * the config and the engagement repository so a non-default agentDir keeps its
+ * artifacts local. Exported as a test seam: the extension falls back to
+ * `getArdentDir()` (the default home) when no screenshotDir is given, which is
+ * what silently ignored `opts.agentDir` until the live smoke trial surfaced it.
+ */
+export function getArdentScreenshotDir(agentDir: string): string {
+  return join(getArdentDir(agentDir), "screenshots");
 }
 
 /** The models to register + scope the picker to: the server catalog when it
@@ -225,6 +236,9 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
           createRunner: buildSubagentRunner,
           role,
           engagementsDir: ardentEngagementsDir,
+          // Same reasoning as the parent extension below: without this the
+          // child's screenshots fall back to the default home agent dir.
+          screenshotDir: ardentScreenshotDir,
         }),
       ],
     });
@@ -234,9 +248,17 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
   // (the plan's layout). Explicit here so the child extensions point at the
   // same tree as the parent instead of falling back to a default.
   const ardentEngagementsDir = getArdentEngagementsDir(opts.agentDir);
+  // Screenshots are an artifact of the engagement, so they belong under the
+  // SAME agent dir as the config and the engagement repository. Without an
+  // explicit screenshotDir the extension falls back to `getArdentDir()`, the
+  // default home dir — which silently ignores `opts.agentDir` (surfaced by the
+  // live smoke trial, whose temp agentDir wrote screenshots into the real
+  // ~/.free-pi/agent/ardent/screenshots).
+  const ardentScreenshotDir = getArdentScreenshotDir(opts.agentDir);
   const ardentExtension: InlineExtension = createArdentExtension({
     loadConfig: () => loadArdentConfigFromFile(ardentConfigPath),
     engagementsDir: ardentEngagementsDir,
+    screenshotDir: ardentScreenshotDir,
     subagent: {
       depth: 0,
       maxDepth: maxSubagentDepth,
