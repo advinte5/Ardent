@@ -153,6 +153,38 @@ Not done: `bind` does not yet apply the drift check (only `start` does), and the
 
 Deliver P5 on the W01/W02 slice: register the ownership experiment, and add a fresh verification attempt that independently re-runs the captured exchange under a control — a `supported` verdict from a profile the investigator did not author, with no model-boolean promotion. Deterministic drivers first; model trials use the same commands, not a separate privileged execution path. P0 fixture work for W03–W16 can run alongside.
 
+### P5 progress: the evaluator is in, the wiring is not (2026-10-05)
+
+`src/ardent/verification.ts` implements the half of P5 that decides whether an
+attempt DISCRIMINATED a claim. It is pure — two captured exchanges plus the
+claim's polarity in, a verdict out — and tested on its own in
+`test/ardent-verification.test.ts`.
+
+Three registered profiles, each digested so a definition change is a new version
+rather than a silent edit: `authorization-boundary` (probe as an unentitled
+identity, control as the entitled one fetching the SAME resource),
+`route-comparison` (one route applies the effect, the sanctioned route refuses),
+and `guarded-transition` (the guarded transition completes, and the control is
+the required prerequisite that establishes the pre-transition baseline). A
+control is REQUIRED by every profile, and incompleteness — a missing capture, a
+failed setup, truncated bytes, an unreachable or empty control — is
+`inconclusive`, never `refuted`.
+
+The same profile serves both claim polarities: it answers "was the boundary
+crossed?" and the finding's `asserts` says which answer supports it, so neither
+polarity is a way to escape the other's evidence.
+
+**Not wired.** This is deliberately add-only and nothing in `src/` calls it yet,
+so the model boolean is still the promotion path. Wiring is a multi-file change
+with a real consequence to plan for: `EvidenceStore.addVerification` must make a
+profile verdict the ONLY route to `supported` (a caller's `passed` becomes a
+non-promoting `claimed` outcome), which removes the bare-boolean promotion the
+current eval scenarios and `eval/driver.ts` rely on. W09/W11/W13 and the W01/W02
+driver all have to reproduce through a profile instead — and W09's fixture is
+stateful, so its probe cannot simply be re-run after the run has already
+mutated the object. That rewiring is the next session's work, not a finishing
+touch: three scenarios, the driver, and the store invariant together.
+
 ## Verified local gaps
 
 The original research inspected extension.ts, evidence.ts, io.ts, types.ts, memory.ts, roles.ts, subagent.ts, subagent-runtime.ts, screenshot.ts, pi-launch.ts, paths.ts, and installed pi extension declarations. The review below updates the evidence/application/binding claims against the current checkout; other findings remain limitations to retest, not newly certified behavior.

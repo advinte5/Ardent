@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T20:16:00Z
+# Generated: 2026-10-05T20:31:44Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -49,6 +49,7 @@ new       8a99d196b9c5106390c97f4e6a0095dca04eca0832cbcf475f4d65bc3d6c6b01  pack
 new       c74192b4f166fc1874fa436cb0da41272b51172fd5ecb1976149406e84089550  packages/cli/src/ardent/subagent.ts
 new       df64de0e46d90b6350089185d045a156cc7262c3037f6a663a4f21dca7d72a3f  packages/cli/src/ardent/theme.ts
 new       97245ddbdeae2fd3cc483b6cf3c9a4de4f8d245c4639e7873ee90b008ab5ba1d  packages/cli/src/ardent/types.ts
+new       cedc998a2e1a84f0ad74fae741f91c8e4a5f31ae7c0a2a186b290ce3d2f5ff3c  packages/cli/src/ardent/verification.ts
 new       33b4ce463749a4efbe52b71d4605860da57d2afab4cd5a3024db68fc2405b892  packages/cli/eval/cases.ts
 new       1d4719d28ec919e9472c5dfdcef85f05e699e71ab9c8ac78fcb2f24c3b79322f  packages/cli/eval/cli.ts
 new       e8f6119a17eaa7dbe52bcec8862277e4f1ab0b7e69f6d94bfd456b1f57f913ab  packages/cli/eval/driver.ts
@@ -109,4 +110,5 @@ new       efb6993fa89d5f24d5442f345185861fbd774b23cd7681169ffc51811d7eabf2  pack
 new       a4bcc4cba2f30c487adfb2f38277ee4fc0f229a83dc887604d07114cec60cace  packages/cli/test/ardent-subagent-tool.test.ts
 new       4dd863e78b3413fd02419fbd169a89dfc9ea274bc67d0bced3a8cfc6bca3b9d2  packages/cli/test/ardent-subagent.test.ts
 new       889f1aadea35fe1fa65f262bd8949491e0f481b04febbaaa8288132bf8cb2a1d  packages/cli/test/ardent-theme.test.ts
+new       7fae087b757f794ac4f68a64ce7d13a840b9173ef6cf1766d506c904015f9631  packages/cli/test/ardent-verification.test.ts
 new       e9c91ba69b9da7b8c3ad726a5090d9104fadee6d6bed04743023bf85186d7379  packages/cli/test/ardent-vision.test.ts
