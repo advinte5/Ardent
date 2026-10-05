@@ -160,6 +160,31 @@ export interface Verification {
   notes?: string;
 }
 
+/**
+ * What a Finding claims about the target.
+ *
+ * `present` the issue exists — an ordinary finding.
+ * `absent`  the issue does NOT exist. A verified `absent` finding is a
+ *           NEGATIVE CONCLUSION: the result is that the boundary held, which is
+ *           a real and reportable outcome, not an issue.
+ *
+ * The distinction exists because without it a verified negative reads exactly
+ * like a verified issue to every consumer that only looks at `status`. That is
+ * what made a CORRECT "no vulnerability" conclusion grade as a demonstrated
+ * finding (see eval/scenarios/W13.ts).
+ */
+export type FindingAssertion = "present" | "absent";
+
+/**
+ * The assertion class of a finding. Unlabelled means `present` on purpose: the
+ * fail-safe direction is to keep counting a record whose label is missing as a
+ * finding. Defaulting to `absent` would let replay silently reclassify a real
+ * finding as "nothing found", which is the one error a report must not make.
+ */
+export function findingAssertion(finding: { asserts?: FindingAssertion }): FindingAssertion {
+  return finding.asserts === "absent" ? "absent" : "present";
+}
+
 /** A confirmed (or candidate) security issue, linked to its evidence. */
 export interface Finding {
   id: string;
@@ -173,6 +198,8 @@ export interface Finding {
   artifactIds: string[];
   verificationIds: string[];
   status: FindingStatus;
+  /** What this finding claims; absent means `present`. See FindingAssertion. */
+  asserts?: FindingAssertion;
 }
 
 /**

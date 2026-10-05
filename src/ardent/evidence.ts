@@ -29,6 +29,7 @@ import type {
   ArtifactKind,
   Confidence,
   Finding,
+  FindingAssertion,
   FindingStatus,
   Hypothesis,
   HypothesisStatus,
@@ -40,7 +41,7 @@ import type {
   Verification,
   VerificationOutcome,
 } from "./types";
-import { isRuntimeOrigin, maxSeverity } from "./types";
+import { findingAssertion, isRuntimeOrigin, maxSeverity } from "./types";
 
 /** A maximal chain of `enables` edges, entry first. */
 export interface AttackPath {
@@ -483,6 +484,8 @@ export class EvidenceStore {
     description: string;
     observationIds?: string[];
     artifactIds?: string[];
+    /** What the finding claims; absent means `present`. See FindingAssertion. */
+    asserts?: FindingAssertion;
   }): { ok: true; finding: Finding } | EvidenceRejection {
     const observationIds = input.observationIds ?? [];
     const artifactIds = input.artifactIds ?? [];
@@ -516,6 +519,9 @@ export class EvidenceStore {
       artifactIds: [...artifactIds],
       verificationIds: [],
       status: "candidate",
+      // Written explicitly on every new record: a reader should be able to tell
+      // an assertion of absence from a missing label.
+      asserts: input.asserts ?? "present",
     };
     const failure = this.commit({ kind: "finding", value });
     if (failure !== undefined) return failure;
@@ -603,9 +609,23 @@ export class EvidenceStore {
     };
   }
 
-  /** Only verified findings belong in a report. */
+  /**
+   * Only verified findings belong in a report — and only the ones that assert
+   * an issue EXISTS. A verified negative conclusion is a result about the
+   * boundary holding; listing it here would print "nothing was found" as a
+   * finding, which is the opposite of what it says.
+   */
   verifiedFindings(): Finding[] {
-    return this.findings.filter((f) => f.status === "verified");
+    return this.findings.filter((f) => f.status === "verified" && findingAssertion(f) === "present");
+  }
+
+  /**
+   * Verified negative conclusions: findings that assert the issue is ABSENT and
+   * were proven. A real outcome, kept separate from the finding list so the two
+   * cannot be confused by anything that counts `status` alone.
+   */
+  verifiedAbsences(): Finding[] {
+    return this.findings.filter((f) => f.status === "verified" && findingAssertion(f) === "absent");
   }
 
   // ---- Relations (attack paths) -------------------------------------------
@@ -704,7 +724,18 @@ export class EvidenceStore {
 
   renderFindings(): string {
     const verified = this.verifiedFindings();
+    const absences = this.verifiedAbsences();
     if (this.findings.length === 0) return "No findings recorded.";
+    // A verified negative conclusion is a result, and a report that showed it
+    // as "none verified yet" would bury the one outcome the run actually
+    // reached. Named first, and never in the finding list.
+    if (verified.length === 0 && absences.length > 0) {
+      const lines = [
+        `No verified findings. ${absences.length} verified negative conclusion(s):`,
+        ...absences.map((f) => `  ${f.id} ${f.title} — ${f.target}`),
+      ];
+      return lines.join("\n");
+    }
     if (verified.length === 0) {
       // Nothing is promoted, but the differences between the records still
       // matter: a refuted lead and an inconclusive one are not both
@@ -728,7 +759,7 @@ export class EvidenceStore {
       lines.push(`  [${f.severity}] ${f.id} ${f.title} — ${f.target} (confidence ${f.confidence.toFixed(2)})`);
       lines.push(`      evidence: ${[...f.observationIds, ...f.artifactIds, ...f.verificationIds].join(", ") || "none"}`);
     }
-    const candidates = this.findings.length - verified.length;
+    const candidates = this.findings.length - verified.length - absences.length;
     if (candidates > 0) {
       const inconclusive = this.findings.filter((f) => f.status === "inconclusive").length;
       const untested = candidates - inconclusive;

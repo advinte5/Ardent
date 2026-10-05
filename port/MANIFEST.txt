@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T19:57:58Z
+# Generated: 2026-10-05T20:11:58Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -30,8 +30,8 @@ new       f6b5d5fb515421e40a77dece57b24c15d9f43bbcd67570c093381b16a1a423dc  pack
 new       54ed8961e5ae75a32733a9f73f2e868c6c540cde6bc6c7cd33b26b42e7315fec  packages/cli/src/ardent/concurrency.ts
 new       19f6b6c763571f80196483325860ee995ba15220414b4aa6968a51c457c96206  packages/cli/src/ardent/config.ts
 new       6d18fac2ea2959addd6045661aec43448820b5ada9f5468fb522f5a21fdffbc1  packages/cli/src/ardent/dashboard.ts
-new       b1bd349973e3ed1d80a2932c7a0abf36e970528e5436f7c25f00ec7e928426c0  packages/cli/src/ardent/evidence.ts
-new       8b31f0020993a916b4d83892da02f8447899d9ee0a0179320ae130857d3dd7f2  packages/cli/src/ardent/extension.ts
+new       9decf410146f79c07af6c66c0e1aa99df92e313778f66100a214f63ce312751e  packages/cli/src/ardent/evidence.ts
+new       25dc889759206cda550ef836f22d82ccf2e7c9a465003324b73c9652d93a0d8d  packages/cli/src/ardent/extension.ts
 new       3f89235264be2e880a8a4ae5971ee68c70d6e8d2a657b76a9d7f656a9f015c31  packages/cli/src/ardent/gate.ts
 new       e5b705852d51dced560a469a1f4b91729bdede0d6bdace4b342529eb7d68cd73  packages/cli/src/ardent/http.ts
 new       d4146b35acfcdf2c22dff08f3d6b53c9b85b387aa4d7d898a87894f552edd357  packages/cli/src/ardent/hud.ts
@@ -48,18 +48,18 @@ new       a1a7c9695c9fe64b84d700a78b971c1e6bae456a5ba2f4978787244991a644c1  pack
 new       8a99d196b9c5106390c97f4e6a0095dca04eca0832cbcf475f4d65bc3d6c6b01  packages/cli/src/ardent/subagent-runtime.ts
 new       c74192b4f166fc1874fa436cb0da41272b51172fd5ecb1976149406e84089550  packages/cli/src/ardent/subagent.ts
 new       df64de0e46d90b6350089185d045a156cc7262c3037f6a663a4f21dca7d72a3f  packages/cli/src/ardent/theme.ts
-new       10bbd85a408213fa9e655ab418d2f59af6f629421c1e982559631566426441d5  packages/cli/src/ardent/types.ts
-new       08705c6d8c68d0220632db3cd9c99652f75ef98cafc4f5f2e27fd491c7d99d31  packages/cli/eval/cases.ts
-new       550a986e4180fdaa34a843925d4260109e4d43ce27154beb938997c3b2750f44  packages/cli/eval/cli.ts
+new       97245ddbdeae2fd3cc483b6cf3c9a4de4f8d245c4639e7873ee90b008ab5ba1d  packages/cli/src/ardent/types.ts
+new       33b4ce463749a4efbe52b71d4605860da57d2afab4cd5a3024db68fc2405b892  packages/cli/eval/cases.ts
+new       1d4719d28ec919e9472c5dfdcef85f05e699e71ab9c8ac78fcb2f24c3b79322f  packages/cli/eval/cli.ts
 new       e8f6119a17eaa7dbe52bcec8862277e4f1ab0b7e69f6d94bfd456b1f57f913ab  packages/cli/eval/driver.ts
 new       1f101d71713da55c807765830ab4d8fc8535d74fa9f7b36eb514446b55952d5b  packages/cli/eval/fixture-app.ts
-new       5f44df6078167f8d992be1e7ac8e0ec2deab25f2980a103c0e38dcd991ab9c1c  packages/cli/eval/grader.ts
+new       ec94b63f5335b0e4a7bd52b4ac5ef126d9304371759c651118fdd8242216ac9f  packages/cli/eval/grader.ts
 new       4165306455c800f8047b871e900411380e43e33c4d610b18e112ef05f9ee28ce  packages/cli/eval/harness.ts
 new       0746a42ae13fc5943f166d88ea698e6fc7443d006db0f6f0a61e6ea29f7eba9f  packages/cli/eval/live-smoke.ts
 new       73685492b4c8ef4b1d98650f5cc9e0df0f0d4482fa3c91f00bb286a0c06bd50b  packages/cli/eval/protocol.ts
-new       8b05e216f5fea5b2c789719a458425ac5af1eba9e1c3cea72433f2a420d5c8b1  packages/cli/eval/runner.ts
+new       7b85022a6a2ab0915f6749cac0bf03e5651ae51c579a319aee04e4086c912ef8  packages/cli/eval/runner.ts
 new       458f875d8eb03b7cfec643d4683fbb2a8aed82bd33f77f1ab492b0c01aeebde8  packages/cli/eval/scenario-bridge.ts
-new       c49ce1e6cdb7e01f0c1c01f1973c2cdf02727a9191f9efe00fadb59b85d92570  packages/cli/eval/scenario-runtime.ts
+new       352c16d2f4a8ea8af7fe59fa3cd21e68a5f774c20810580fb24c368e0145dddd  packages/cli/eval/scenario-runtime.ts
 new       2ec404aeb13f237b611aff397f4f72ad0aec337c9c92dc54c8d80925e19b63c1  packages/cli/eval/scenarios/W03.ts
 new       1b2f372a9ab2bf9ea42b6d0cdacb2b0dcc633afabf8693e5feef81213620b0d4  packages/cli/eval/scenarios/W04.ts
 new       407266e7e7ac4daac75fbec33328710114eff7c515dce2c80a7cb758d443f62b  packages/cli/eval/scenarios/W05.ts
@@ -70,7 +70,7 @@ new       7c7edcfb668f263f69dd06f1991f0faf651195b4e63b69a1fe4aa4dc9ff2e906  pack
 new       e6ac325de9778f8ade484886eda9ab89e364b3d8e0767c6fe09ac5854f5c6c31  packages/cli/eval/scenarios/W10.ts
 new       22276fe4a6e63c3bb20b1f9d02036eb074d4f508c50a8470ec61f94a86193ba8  packages/cli/eval/scenarios/W11.ts
 new       ee85cb775098648f47d836e100592c82ba362f108cf799f4dbb5301ae951cba9  packages/cli/eval/scenarios/W12.ts
-new       79153f1f904b69b4df829f77760c597427fdc9cd9c5765154b1bb1e102656abe  packages/cli/eval/scenarios/W13.ts
+new       f9a3fee49b0348a0991bd4d3c31b6413b96ea7e85d56b1599d374f7155d00626  packages/cli/eval/scenarios/W13.ts
 new       2f7f184d3ccf94c09ff222afec882801f245626251bc95ec0291565886c2cab7  packages/cli/eval/scenarios/W15.ts
 new       e30cfcd788df4543e8b12df1238705ca40ebea625966af26b42297f8041fcdb5  packages/cli/eval/scenarios/W16.ts
 new       6b5a061bb12a65d15d2bea21bac2763d792d7f26048ac8c212c529115d222218  packages/cli/eval/scenarios/index.ts
@@ -94,6 +94,7 @@ new       776928b8863f57d990bf6ba9e0fb131b7fbdc9e2224545722e5bf6b8649aaf9d  pack
 new       2414c2ae032d25ceefe59ea850f26743f1c1e2a51dc0c6f387cd94a71717619d  packages/cli/test/ardent-identities.test.ts
 new       8d3f83d50d1a67101865ea3b579641e6f7c0f2c6fcbc72a66a38e09bb19ff7b9  packages/cli/test/ardent-io.test.ts
 new       5e863118d725f32d8d00b11851fb6bf6a507c6f82e6c2438b72e1b65f5071df1  packages/cli/test/ardent-memory.test.ts
+new       6ca4152eaa3db039ca19606c5af5102a546650824566d41a3e788946798b32c9  packages/cli/test/ardent-negative-conclusion.test.ts
 new       f773cda31e354511c576b9c3025daab0063a0700e9a7d62d7adb93e655d1ac41  packages/cli/test/ardent-negotiation.test.ts
 new       7ddc941f160822e3436583dc9cf35f43902ce7ed31821715bb175de0e53207c8  packages/cli/test/ardent-overlay.test.ts
 new       0e11e05bc36272c657bd725e277af068849fe675a4e4d9bfe3f32c4524a246cd  packages/cli/test/ardent-prompt.test.ts

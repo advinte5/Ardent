@@ -49,7 +49,7 @@ screenshots dir was unchanged afterwards. (A positive check — a screenshot lan
 under the temp `agentDir` — was not observed, because the confirming run produced no
 screenshot.)
 
-### F2 — a correct negative conclusion is scored as a false positive
+### F2 — a correct negative conclusion is scored as a false positive (fixed)
 
 On the secured variant the model recorded its "no vulnerability found" conclusion as
 an `ardent_finding` and then an `ardent_verify` with `outcome: "supported"`. On replay
@@ -58,9 +58,18 @@ grader derives `observedOutcome` as `demonstrated` whenever a verified finding e
 with captured proof — so a **correct** negative result grades as
 `unexpected` against the `no_finding` expectation.
 
-There is no way to express a negative conclusion. Either the verify rule must refuse
-to promote a finding that asserts an absence, or a first-class "no finding" record is
-needed. This is an interface gap, not a model error — the model's answer was right.
+There was no way to express a negative conclusion. This is an interface gap, not a
+model error — the model's answer was right.
+
+Fixed with a claim polarity rather than a second record type: `Finding` now carries
+`asserts: "present" | "absent"` (absent = a negative conclusion), `verifiedFindings()`
+and the grader's `verified` count are **positive-only**, and a proven absence folds to
+`no_finding` — the boundary HELD, which is a result, not an issue. An unlabelled record
+still counts as a positive claim on purpose: defaulting the other way would let replay
+silently reclassify a real finding as "nothing found". `eval/scenarios/W13.ts` now
+files a verified negative conclusion and grades it, so the defect is reproducible in
+the deterministic suite instead of only under a live model (it graded `demonstrated`
+against the `no_finding` expectation before the fix, and `no_finding` after).
 
 ### F3 — scope is host-granular, so an excluded origin on the same host is reachable
 
@@ -119,8 +128,8 @@ and is noisy in any headless context.
 
 ## Recommended next steps
 
-1. Fix F2 (negative-conclusion handling) — it is the one finding that corrupts a
-   *result*, not just hygiene.
+1. ~~Fix F2~~ (done) — the one finding that corrupted a *result*, not just hygiene.
+   See the F2 section above for the shape of the fix.
 2. Decide the scope-granularity question behind F3 (host vs. origin), since the eval's
    "excluded origin received no traffic" property is not enforceable at host granularity.
 3. Decide whether `bash` belongs in an engagement's tool set at all, given F4/F5.

@@ -299,6 +299,12 @@ const FINDING_PARAMS = Type.Object({
   ),
   artifact_ids: Type.Optional(Type.Array(Type.String(), { description: "Artifact ids (art-N) that support it." })),
   confidence: Type.Optional(Type.Number({ description: "0..1 confidence.", default: 0.5 })),
+  asserts: Type.Optional(
+    Type.Union([Type.Literal("present"), Type.Literal("absent")], {
+      description:
+        "What this claim asserts. 'present' (default) — the issue exists. 'absent' — the issue does NOT exist on this target: use it when the result of a test is that a boundary HOLDS. A verified 'absent' finding is a negative conclusion and is reported as a result, not as a demonstrated issue.",
+    }),
+  ),
 });
 
 const VERIFY_PARAMS = Type.Object({
@@ -1336,7 +1342,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
         name: ARDENT_FINDING_TOOL,
         label: "Record finding",
         description:
-          "Record a candidate security finding linked to existing observation/artifact ids. A finding with no evidence is rejected.",
+          "Record a candidate security finding linked to existing observation/artifact ids. A finding with no evidence is rejected. Set asserts: 'absent' when your conclusion is that an issue does NOT exist — that boundary checklist is a recorded result too, and it is graded as a negative conclusion rather than as a demonstrated issue.",
         promptSnippet: "Record a candidate Ardent finding with supporting evidence",
         promptGuidelines: [
           "A finding must cite at least one observation or artifact id — an empty citation list is refused as missing_citation. Call ardent_note (or capture an artifact) first.",
@@ -1364,6 +1370,7 @@ export function createArdentExtension(opts: CreateArdentExtensionOptions): Inlin
             description: params.description,
             observationIds: params.observation_ids,
             ...(params.artifact_ids === undefined ? {} : { artifactIds: params.artifact_ids }),
+            ...(params.asserts === undefined ? {} : { asserts: params.asserts }),
           });
           if (!result.ok) {
             if (result.code === "storage_unavailable") return storageFailure(result.error);

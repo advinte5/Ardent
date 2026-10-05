@@ -24,6 +24,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getArdentDir } from "../src/paths";
+import { findingAssertion } from "../src/ardent/types";
 import { CLI_VERSION } from "../src/version";
 import { CASES, caseById } from "./cases";
 import { runDeterministicTrial, type TrialResult } from "./driver";
@@ -93,7 +94,10 @@ export interface SuiteResult {
       checkStatus: Record<string, { pass: number; fail: number; inconclusive: number }>;
     }>;
     refusedCases: Array<{ caseId: string; reason: string }>;
+    /** Findings promoted to verified that assert an issue EXISTS. */
     verifiedFindings: number;
+    /** Verified negative conclusions — results, never counted as findings. */
+    verifiedAbsences: number;
     limitations: string[];
   };
 }
@@ -142,6 +146,7 @@ export async function runSuite(opts: SuiteOptions = {}): Promise<SuiteResult> {
   const trialRecords: SuiteTrialRecord[] = [];
   const gradingByCase = new Map<string, GradingReport[]>();
   let verifiedFindings = 0;
+  let verifiedAbsences = 0;
 
   for (const caseId of caseIds) {
     const caseDef = caseById(caseId);
@@ -222,7 +227,14 @@ export async function runSuite(opts: SuiteOptions = {}): Promise<SuiteResult> {
           ],
         };
         writeFileSync(join(trialDir, "trial.json"), `${JSON.stringify(record, null, 2)}\n`);
-        verifiedFindings += result.evidence.findings.filter((f) => f.status === "verified").length;
+        // Split by what the claim asserts: a verified negative conclusion is a
+        // result about the boundary holding, and folding it into the finding
+        // count is exactly the confusion this split exists to remove.
+        for (const f of result.evidence.findings) {
+          if (f.status !== "verified") continue;
+          if (findingAssertion(f) === "absent") verifiedAbsences += 1;
+          else verifiedFindings += 1;
+        }
         trialRecords.push(record);
         const list = gradingByCase.get(caseId) ?? [];
         list.push(grading);
@@ -290,6 +302,7 @@ export async function runSuite(opts: SuiteOptions = {}): Promise<SuiteResult> {
     cases,
     refusedCases: refused,
     verifiedFindings,
+    verifiedAbsences,
     limitations,
   };
   writeFileSync(join(outDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);

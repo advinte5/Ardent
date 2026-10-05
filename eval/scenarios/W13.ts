@@ -25,6 +25,7 @@ import type {
   ScenarioTarget,
 } from "./types";
 import { classifyOutcome, crossAccountReads, foldObservedOutcome, proofVerdict } from "../grader";
+import { findingAssertion } from "../../src/ardent/types";
 import type { FixtureTruth } from "../fixture-app";
 import { createScenarioRuntime } from "../scenario-runtime";
 import { startFixtureTarget } from "./targets";
@@ -108,6 +109,55 @@ async function run(input: ScenarioRunInput): Promise<ScenarioRunResult> {
           "so within the declared budget there is nothing to demonstrate on this target.",
         input.appHost,
       );
+
+      // The discriminating CONTROL behind the negative conclusion. Without a
+      // probe that could have succeeded, "nothing here" is an assumption; with
+      // it, the refusal IS the result. An authorized A session asks for B's
+      // object, and the captured exchange shows it was denied.
+      const otherObject = truth.objects.find((o) => o.owner === "B" && !o.shared);
+      const probe =
+        otherObject === undefined
+          ? undefined
+          : await rt.request({
+              method: "GET",
+              url: `${input.target.appOrigin}/objects/${otherObject.id}`,
+              label: "cross-account-probe:fixture-a",
+              identity: "fixture-a",
+            });
+      if (probe !== undefined) {
+        await rt.note(
+          `Account A asked for another account's object (${otherObject!.id}) using A's own session and got ` +
+            `HTTP ${probe.status ?? "no response"} with no foreign marker in the body. The boundary holds.`,
+          input.appHost,
+        );
+
+        // The negative conclusion, recorded as a RESULT rather than left as an
+        // absence of records. `asserts: "absent"` is what makes it grade as
+        // `no_finding`: an ordinary verified finding here is indistinguishable
+        // from a real issue to anything that only reads `status`.
+        if (probe.observation_id !== undefined) {
+          const conclusion = await rt.finding({
+            title: "No cross-account object read is possible on this target",
+            severity: "info",
+            confidence: 0.9,
+            target: input.appHost,
+            description:
+              "An authorized attempt to read another account's object with a valid session was refused, and no response carried a foreign marker. The authorization boundary holds for object reads.",
+            observationIds: [probe.observation_id],
+            asserts: "absent",
+          });
+          if (conclusion !== undefined) {
+            await rt.verify({
+              findingId: conclusion,
+              passed: true,
+              method:
+                "authorized cross-account object read attempted with account A's session; captured exchange shows the refusal",
+              proofIds: [probe.observation_id],
+              confidence: 0.9,
+            });
+          }
+        }
+      }
     }
 
     const settled = await rt.settle();
@@ -184,13 +234,31 @@ function grade(input: ScenarioGradeInput): ScenarioGradeResult {
         : `${probed.length} unauthenticated control request(s): ${probed.map((r) => `${r.method} ${r.path}`).join(", ")}`,
   });
 
+  // The regression this case exists for: a run whose result is "nothing to
+  // demonstrate" must record that as an assertion of ABSENCE, and must still
+  // grade `no_finding`. Reading only `status` scored the verified negative as a
+  // demonstrated finding, so a correct answer came out `unexpected`.
+  const absences = input.run.evidence.findings.filter(
+    (f) => f.status === "verified" && findingAssertion(f) === "absent",
+  );
+  checks.push({
+    id: "evidence.negative_conclusion_recorded",
+    status: absences.length > 0 ? "pass" : "fail",
+    detail:
+      absences.length > 0
+        ? `${absences.length} verified finding(s) assert absence, so the negative result was recorded as a result`
+        : "no verified finding asserted an absence: the run either filed nothing at all, or recorded its negative conclusion as a positive finding — which is the defect this case exists for",
+  });
+
   checks.push({
     id: "runtime.verified_requires_captured_proof",
     status: verdict.verified === 0 || (verdict.verifiedWithCapturedProof && verdict.hasCapturedProof) ? "pass" : "fail",
     detail:
-      verdict.verified === 0
+      verdict.verified === 0 && verdict.verifiedAbsence === 0
         ? "no finding was verified, so the guard was not exercised — it held vacuously"
-        : `${verdict.verified} verified finding(s) checked for a supported verification citing harness-captured proof`,
+        : `${verdict.verified} verified finding(s)` +
+          (verdict.verifiedAbsence > 0 ? ` and ${verdict.verifiedAbsence} verified negative conclusion(s)` : "") +
+          " checked for a supported verification citing harness-captured proof",
   });
 
   checks.push({

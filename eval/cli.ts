@@ -52,6 +52,11 @@ async function main(): Promise<void> {
   }
   for (const r of result.summary.refusedCases) console.log(`  REFUSED ${r.caseId}: ${r.reason}`);
   console.log(`verified findings: ${result.summary.verifiedFindings}`);
+  if (result.summary.verifiedAbsences > 0) {
+    console.log(
+      `verified negative conclusions: ${result.summary.verifiedAbsences} (a result about the boundary holding, not a finding)`,
+    );
+  }
   console.log(
     `implemented cases in this checkpoint: ${IMPLEMENTED_CASE_IDS.join(", ")} — deterministic drivers only, ` +
       "no model quality claim",

@@ -116,6 +116,8 @@ export interface ScenarioRuntime {
     target: string;
     description: string;
     observationIds: string[];
+    /** What the finding claims; absent means `present`. See FindingAssertion. */
+    asserts?: "present" | "absent";
   }): Promise<string | undefined>;
   verify(input: {
     findingId: string;
@@ -283,12 +285,17 @@ export function createScenarioRuntime(opts: ScenarioRuntimeOptions): ScenarioRun
         target: input.target,
         description: input.description,
         observation_ids: input.observationIds,
+        ...(input.asserts === undefined ? {} : { asserts: input.asserts }),
       },
       undefined,
       undefined,
       ctx,
     )) as { details?: { finding_id?: string } };
-    record("evidence", { tool: "ardent_finding", findingId: out.details?.finding_id ?? null });
+    record("evidence", {
+      tool: "ardent_finding",
+      findingId: out.details?.finding_id ?? null,
+      asserts: input.asserts ?? "present",
+    });
     return out.details?.finding_id;
   };
 

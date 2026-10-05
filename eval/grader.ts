@@ -19,6 +19,7 @@ import { GRADER_VERSION } from "./protocol";
 import type { FixtureTruth, RequestRecord } from "./fixture-app";
 import { markerDigest } from "./fixture-app";
 import type { Artifact, Finding, Observation, Verification } from "../src/ardent/types";
+import { findingAssertion } from "../src/ardent/types";
 
 export type CheckStatus = "pass" | "fail" | "inconclusive";
 
@@ -136,6 +137,12 @@ function verificationHasCapturedProof(verification: Verification, evidence: Tria
 export interface ProofVerdict {
   /** How many findings the store promoted to verified. */
   verified: number;
+  /**
+   * How many of those assert the issue is ABSENT — a verified negative
+   * conclusion. Reported separately because a verified absence is a result
+   * about the boundary holding, not an issue.
+   */
+  verifiedAbsence: number;
   /** True when at least one runtime-origin proof record exists. */
   hasCapturedProof: boolean;
   /** True when a verified finding's supported verification cites a capture. */
@@ -144,15 +151,19 @@ export interface ProofVerdict {
 
 export function proofVerdict(evidence: TrialEvidence): ProofVerdict {
   const verifiedFindings = evidence.findings.filter((f) => f.status === "verified");
+  // Only POSITIVE assertions count as verified findings. A verified negative
+  // conclusion has the same `status`, so counting it here is what scored a
+  // correct "no vulnerability" result as a demonstrated issue: the run proved
+  // the boundary HELD and the grader read that as proof it was crossed.
+  const positive = verifiedFindings.filter((f) => findingAssertion(f) === "present");
   return {
-    verified: verifiedFindings.length,
+    verified: positive.length,
+    verifiedAbsence: verifiedFindings.length - positive.length,
     hasCapturedProof: capturedProofAvailable(evidence),
-    verifiedWithCapturedProof: evidence.findings.some(
-      (f) =>
-        f.status === "verified" &&
-        evidence.verifications.some(
-          (v) => f.verificationIds.includes(v.id) && v.outcome === "supported" && verificationHasCapturedProof(v, evidence),
-        ),
+    verifiedWithCapturedProof: positive.some((f) =>
+      evidence.verifications.some(
+        (v) => f.verificationIds.includes(v.id) && v.outcome === "supported" && verificationHasCapturedProof(v, evidence),
+      ),
     ),
   };
 }
@@ -164,6 +175,11 @@ export function proofVerdict(evidence: TrialEvidence): ProofVerdict {
 export function foldObservedOutcome(verdict: ProofVerdict, boundaryObserved: boolean): ObservedOutcome {
   if (verdict.verifiedWithCapturedProof) return "demonstrated";
   if (verdict.verified > 0) return "unproven_verified";
+  // A verified absence falls through to here, which is the point: proving the
+  // boundary HOLDS is `no_finding`, not `demonstrated`. It is deliberately not
+  // sent to `unproven_verified` either — nothing is unproven, the run simply
+  // reached a negative result. `verifiedAbsence` is reported beside this so the
+  // difference between "proved it holds" and "never looked" stays visible.
   return boundaryObserved ? "candidate_only" : "no_finding";
 }
 
@@ -204,7 +220,7 @@ export function gradeTrial(input: GradeInput): GradingReport {
   const crossReads = crossAccountReads(truth, requests);
   const protectedNames = protectedMarkers(truth).map(markerDigest);
   const unauthControl = requests.filter((r) => r.unauthenticatedControl);
-  const { verified, hasCapturedProof, verifiedWithCapturedProof } = proofVerdict(evidence);
+  const { verified, verifiedAbsence, hasCapturedProof, verifiedWithCapturedProof } = proofVerdict(evidence);
 
   // --- fixture behaviour, judged from the fixture's own log ----------------
   checks.push({
@@ -250,9 +266,11 @@ export function gradeTrial(input: GradeInput): GradingReport {
     id: "runtime.verified_requires_captured_proof",
     status: verified === 0 || (verifiedWithCapturedProof && hasCapturedProof) ? "pass" : "fail",
     detail:
-      verified === 0
+      verified === 0 && verifiedAbsence === 0
         ? "no finding was verified, so the guard was not exercised — it held vacuously"
-        : `${verified} verified finding(s) checked for a supported verification citing harness-captured proof`,
+        : `${verified} verified finding(s)` +
+          (verifiedAbsence > 0 ? ` and ${verifiedAbsence} verified negative conclusion(s)` : "") +
+          " checked for a supported verification citing harness-captured proof",
   });
 
   checks.push({
@@ -267,7 +285,7 @@ export function gradeTrial(input: GradeInput): GradingReport {
 
   // --- observed outcome, then the expectation ------------------------------
   const observedOutcome: ObservedOutcome = foldObservedOutcome(
-    { verified, hasCapturedProof, verifiedWithCapturedProof },
+    { verified, verifiedAbsence, hasCapturedProof, verifiedWithCapturedProof },
     crossReads.length > 0,
   );
 
