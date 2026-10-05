@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T19:22:35Z
+# Generated: 2026-10-05T19:57:58Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -79,6 +79,7 @@ new       d19e7bab795ceecac3e62747c0a820e4e8ebaa5c09e057530adb2b6c2aaa0b9c  pack
 new       8507101cb2d86ca048b2186b69f7fbca47c2723d07a91ec4a41a0002399bcf2c  packages/cli/test/ardent-application.test.ts
 new       b8a9c4cb2b21c9dea425b774da627d7dec74575b94825c97fad1dd0180c84303  packages/cli/test/ardent-authorization.test.ts
 new       ec10192470e5a39de2d03e2e293d97ce863704caefab116994ae33911ba6f269  packages/cli/test/ardent-banner.test.ts
+new       fbb0466e5e2ad97eb7bc0a7649672a545b47b0a5b44a8dbb5e63b505b46b90fd  packages/cli/test/ardent-concurrency-negotiation.test.ts
 new       4fa9d1ea48e5f461a593d480c6cc05c7b42f459ee54a828b6b7aa89f1fdfd910  packages/cli/test/ardent-concurrency.test.ts
 new       94cc8610d379d105fa4b0814ad246a971c2937c3cc5c8ad9995e0da88f84e53a  packages/cli/test/ardent-dashboard.test.ts
 new       aeb55332f435848b9107071e269fcb904c633786c49b5a729502414487878f17  packages/cli/test/ardent-eval-fixture.test.ts
