@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T19:14:33Z
+# Generated: 2026-10-05T19:21:50Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -59,7 +59,7 @@ new       0746a42ae13fc5943f166d88ea698e6fc7443d006db0f6f0a61e6ea29f7eba9f  pack
 new       73685492b4c8ef4b1d98650f5cc9e0df0f0d4482fa3c91f00bb286a0c06bd50b  packages/cli/eval/protocol.ts
 new       8b05e216f5fea5b2c789719a458425ac5af1eba9e1c3cea72433f2a420d5c8b1  packages/cli/eval/runner.ts
 new       458f875d8eb03b7cfec643d4683fbb2a8aed82bd33f77f1ab492b0c01aeebde8  packages/cli/eval/scenario-bridge.ts
-new       40e50c2d1990d1e5dcef60d366dc1bdee7b4f8a10e87a9a4e67ce38aa0dce1dd  packages/cli/eval/scenario-runtime.ts
+new       c49ce1e6cdb7e01f0c1c01f1973c2cdf02727a9191f9efe00fadb59b85d92570  packages/cli/eval/scenario-runtime.ts
 new       8507101cb2d86ca048b2186b69f7fbca47c2723d07a91ec4a41a0002399bcf2c  packages/cli/test/ardent-application.test.ts
 new       b8a9c4cb2b21c9dea425b774da627d7dec74575b94825c97fad1dd0180c84303  packages/cli/test/ardent-authorization.test.ts
 new       ec10192470e5a39de2d03e2e293d97ce863704caefab116994ae33911ba6f269  packages/cli/test/ardent-banner.test.ts
@@ -67,7 +67,7 @@ new       4fa9d1ea48e5f461a593d480c6cc05c7b42f459ee54a828b6b7aa89f1fdfd910  pack
 new       94cc8610d379d105fa4b0814ad246a971c2937c3cc5c8ad9995e0da88f84e53a  packages/cli/test/ardent-dashboard.test.ts
 new       aeb55332f435848b9107071e269fcb904c633786c49b5a729502414487878f17  packages/cli/test/ardent-eval-fixture.test.ts
 new       15be055ed0888c15cdb33a3da34249e3068e65dd9345ed056d368b0379d97215  packages/cli/test/ardent-eval-protocol.test.ts
-new       a4a0735d3fae7b16ac0dee7f7eeff0d46bdf829c92d4d8c3b5e1d2b44c3db762  packages/cli/test/ardent-eval-scenarios.test.ts
+new       75cb17a87c7f6f7b0d734e1fb267adf8762fdb412f49acc929eb79dab98a8aed  packages/cli/test/ardent-eval-scenarios.test.ts
 new       aebb741496548a903c37281d1df5d2e628070d3205dba2d1e4718b3b0041696a  packages/cli/test/ardent-evidence-ownership.test.ts
 new       ed1ec3d254452b44f404cf532aa2b1393bcb9ca9a65366cd79d4562aff6dcced  packages/cli/test/ardent-evidence.test.ts
 new       ba7b4f87e086a1f0cbfeff37159f81647469419cad733e8cf58065a9104b12be  packages/cli/test/ardent-extension.test.ts

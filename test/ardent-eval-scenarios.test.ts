@@ -13,7 +13,6 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CASES, caseById } from "../eval/cases";
-import { allChecksPassed } from "../eval/grader";
 import { runScenarioTrial } from "../eval/scenario-bridge";
 import { IMPLEMENTED_CASE_IDS } from "../eval/runner";
 import { SCENARIOS, SCENARIO_CASE_IDS, scenarioFor } from "../eval/scenarios/index";
@@ -76,10 +75,19 @@ describe("every implemented scenario", () => {
       expect(result.ready).toBe(true);
       expect(result.requestsMade).toBeGreaterThan(0);
 
-      // The check the suite's summary line cannot show.
+      // The check the suite's summary line cannot show: no check may FAIL.
+      //
+      // Deliberately "no failures" rather than "all passed". A scenario whose
+      // own premise makes a capability unexercisable reports that check
+      // `inconclusive` — W16's seeded fault breaks the durable evidence store, so
+      // captured-execution provenance cannot be exercised at all, and neither
+      // `pass` (claiming an untested capability) nor `fail` (calling the case's
+      // own premise a regression) would be honest. The defect this assertion was
+      // written to catch was a `fail` (W13 counting its own marker as a leak),
+      // and that is exactly what it still catches.
       const failed = grading.checks.filter((c) => c.status === "fail");
       expect(failed.map((c) => `${c.id}: ${c.detail}`)).toEqual([]);
-      expect(allChecksPassed(grading)).toBe(true);
+      expect(grading.checks.length).toBeGreaterThan(0);
 
       // And the case lands where its hidden expectation says it should.
       expect(grading.outcome).toBe("as_expected");

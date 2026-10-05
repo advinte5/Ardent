@@ -19,6 +19,7 @@ import { W11Scenario } from "./W11";
 import { W12Scenario } from "./W12";
 import { W13Scenario } from "./W13";
 import { W15Scenario } from "./W15";
+import { W16Scenario } from "./W16";
 
 const ALL: readonly Scenario[] = [
   W03Scenario,
@@ -33,6 +34,7 @@ const ALL: readonly Scenario[] = [
   W12Scenario,
   W13Scenario,
   W15Scenario,
+  W16Scenario,
 ];
 
 /** Every implemented scenario, keyed by case id. */

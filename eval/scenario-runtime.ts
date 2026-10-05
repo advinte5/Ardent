@@ -21,6 +21,7 @@ import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseArdentConfig } from "../src/ardent/config";
 import { EvidenceStore } from "../src/ardent/evidence";
+import type { EvidencePersist } from "../src/ardent/evidence";
 import { readEvidenceLog } from "../src/ardent/io";
 import type { IdentityResolver } from "../src/ardent/http";
 import type { Artifact, Finding, Observation, Verification } from "../src/ardent/types";
@@ -37,6 +38,21 @@ export interface ScenarioRuntimeOptions {
   engagementsDir: string;
   /** Host the scenario's app origin resolves to. */
   appHost: string;
+  /**
+   * Injected evidence store, for W16's write-failure case. A scenario supplies
+   * one built over a persister that throws, so the engagement's durable log is
+   * broken from the first write. Every other scenario leaves this unset and gets
+   * the extension's own store.
+   */
+  evidence?: EvidenceStore;
+}
+
+/** A store whose every durable write fails — W16's seeded device fault. */
+export function failingEvidenceStore(message: string): EvidenceStore {
+  const persist: EvidencePersist = () => {
+    throw new Error(message);
+  };
+  return new EvidenceStore({ persist, now: () => Date.now() });
 }
 
 export interface ContactRequest {
@@ -121,6 +137,7 @@ export function createScenarioRuntime(opts: ScenarioRuntimeOptions): ScenarioRun
     config: parseArdentConfig({ enabled: true, label: `eval-${opts.caseDef.caseId}`, targets: [opts.appHost] })!,
     identities: identityResolver,
     engagementsDir: opts.engagementsDir,
+    ...(opts.evidence === undefined ? {} : { evidence: opts.evidence }),
   });
   const ctx = harnessContext({ sessionId: opts.sessionId });
   const trace: TraceEntry[] = [];
