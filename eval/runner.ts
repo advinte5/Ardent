@@ -30,9 +30,18 @@ import { runDeterministicTrial, type TrialResult } from "./driver";
 import { gradeTrial, type GradingReport } from "./grader";
 import { startFixture, type Fixture } from "./fixture-app";
 import { EVAL_SCHEMA_VERSION, GRADER_VERSION, type EvalCase } from "./protocol";
+import { runScenarioTrial, type ScenarioTrialOutcome } from "./scenario-bridge";
+import { SCENARIO_CASE_IDS, scenarioFor } from "./scenarios/index";
 
-/** Cases this checkpoint actually wires to a fixture. */
-export const IMPLEMENTED_CASE_IDS: readonly string[] = ["W01", "W02"];
+/**
+ * Cases this checkpoint actually wires to a target.
+ *
+ * W01/W02 keep the original shared fixture + driver. Every other implemented
+ * case is a self-contained scenario module registered in `eval/scenarios`, which
+ * is the single source of truth for what is implemented — a case cannot be
+ * listed here and missing there.
+ */
+export const IMPLEMENTED_CASE_IDS: readonly string[] = ["W01", "W02", ...SCENARIO_CASE_IDS];
 
 export interface SuiteOptions {
   /** Cases to run. Defaults to the implemented set. */
@@ -140,29 +149,44 @@ export async function runSuite(opts: SuiteOptions = {}): Promise<SuiteResult> {
       refused.push({ caseId, reason: "unknown case id" });
       continue;
     }
+    const scenario = scenarioFor(caseId);
     let fixture: Fixture | undefined;
     try {
       for (let attempt = 0; attempt < trials; attempt += 1) {
         const seed = baseSeed + caseIds.indexOf(caseId) * 100 + attempt;
-        fixture ??= await fixtureFor(caseDef, seed);
-        const truth = await fixture.reset(seed);
         const trialId = `${caseId}-t${attempt + 1}-${seed.toString(16)}`;
         const trialStartedAt = isoNow();
-        const result = await runDeterministicTrial({
-          caseDef,
-          fixture,
-          trialId,
-          sessionId: `eval-${runId}-${attempt + 1}`,
-          engagementsDir: join(outDir, "workspaces", trialId),
-        });
-        const grading = gradeTrial({
-          caseDef,
-          trialId,
-          truth,
-          requests: fixture.requests(),
-          evidence: result.evidence,
-          ready: result.ready,
-        });
+        let bundle: ScenarioTrialOutcome;
+        if (scenario !== undefined) {
+          bundle = await runScenarioTrial({
+            scenario,
+            caseDef,
+            trialId,
+            seed,
+            sessionId: `eval-${runId}-${attempt + 1}`,
+            engagementsDir: join(outDir, "workspaces", trialId),
+          });
+        } else {
+          fixture ??= await fixtureFor(caseDef, seed);
+          const truth = await fixture.reset(seed);
+          const result = await runDeterministicTrial({
+            caseDef,
+            fixture,
+            trialId,
+            sessionId: `eval-${runId}-${attempt + 1}`,
+            engagementsDir: join(outDir, "workspaces", trialId),
+          });
+          const grading = gradeTrial({
+            caseDef,
+            trialId,
+            truth,
+            requests: fixture.requests(),
+            evidence: result.evidence,
+            ready: result.ready,
+          });
+          bundle = { result, grading, fixtureRevision: truth.revision };
+        }
+        const { result, grading } = bundle;
         const trialDir = join(outDir, "trials", trialId);
         mkdirSync(trialDir, { recursive: true });
         writeFileSync(join(trialDir, "trace.jsonl"), result.trace.map((e) => JSON.stringify(e)).join("\n") + "\n");
@@ -178,7 +202,7 @@ export async function runSuite(opts: SuiteOptions = {}): Promise<SuiteResult> {
           caseId,
           split: caseDef.split,
           seed,
-          fixtureRevision: truth.revision,
+          fixtureRevision: bundle.fixtureRevision,
           startedAt: trialStartedAt,
           endedAt: isoNow(),
           terminalOutcome: result.terminalOutcome,
@@ -237,7 +261,8 @@ export async function runSuite(opts: SuiteOptions = {}): Promise<SuiteResult> {
 
   const limitations = [
     "Deterministic drivers only: no model calls, no provider, no token or spend data. This is a runtime and fixture baseline, not a quality measurement.",
-    "Only W01 and W02 have fixture wiring; every other declared case is refused rather than skipped.",
+    `Implemented cases: ${IMPLEMENTED_CASE_IDS.join(", ")}. Every other declared case is refused rather than skipped.`,
+    "W01/W02 run the original shared fixture + driver; other implemented cases run self-contained scenario modules.",
     "Scope has host granularity only, so the fixture's control plane relies on its harness token rather than on a scope exclusion.",
     "Missing usage fields are null by construction: an unavailable value is never recorded as zero.",
   ];

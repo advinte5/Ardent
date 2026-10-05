@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T18:56:45Z
+# Generated: 2026-10-05T19:10:43Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -50,14 +50,16 @@ new       c74192b4f166fc1874fa436cb0da41272b51172fd5ecb1976149406e84089550  pack
 new       df64de0e46d90b6350089185d045a156cc7262c3037f6a663a4f21dca7d72a3f  packages/cli/src/ardent/theme.ts
 new       10bbd85a408213fa9e655ab418d2f59af6f629421c1e982559631566426441d5  packages/cli/src/ardent/types.ts
 new       08705c6d8c68d0220632db3cd9c99652f75ef98cafc4f5f2e27fd491c7d99d31  packages/cli/eval/cases.ts
-new       3ccd6f92b72acc447f050fb4ea9d78e0ab0538e4f94330ae2507fe0fde499829  packages/cli/eval/cli.ts
+new       550a986e4180fdaa34a843925d4260109e4d43ce27154beb938997c3b2750f44  packages/cli/eval/cli.ts
 new       e8f6119a17eaa7dbe52bcec8862277e4f1ab0b7e69f6d94bfd456b1f57f913ab  packages/cli/eval/driver.ts
 new       1f101d71713da55c807765830ab4d8fc8535d74fa9f7b36eb514446b55952d5b  packages/cli/eval/fixture-app.ts
-new       79426565a55effd7f7a42fb7f65bbd08676c39288f46cf177d5a56268a021bdd  packages/cli/eval/grader.ts
+new       5f44df6078167f8d992be1e7ac8e0ec2deab25f2980a103c0e38dcd991ab9c1c  packages/cli/eval/grader.ts
 new       4165306455c800f8047b871e900411380e43e33c4d610b18e112ef05f9ee28ce  packages/cli/eval/harness.ts
 new       0746a42ae13fc5943f166d88ea698e6fc7443d006db0f6f0a61e6ea29f7eba9f  packages/cli/eval/live-smoke.ts
 new       73685492b4c8ef4b1d98650f5cc9e0df0f0d4482fa3c91f00bb286a0c06bd50b  packages/cli/eval/protocol.ts
-new       2efc1ac8848193184d94e222805e05ee62ae6286c601f2687f78de6cc4af1f74  packages/cli/eval/runner.ts
+new       8b05e216f5fea5b2c789719a458425ac5af1eba9e1c3cea72433f2a420d5c8b1  packages/cli/eval/runner.ts
+new       458f875d8eb03b7cfec643d4683fbb2a8aed82bd33f77f1ab492b0c01aeebde8  packages/cli/eval/scenario-bridge.ts
+new       40e50c2d1990d1e5dcef60d366dc1bdee7b4f8a10e87a9a4e67ce38aa0dce1dd  packages/cli/eval/scenario-runtime.ts
 new       8507101cb2d86ca048b2186b69f7fbca47c2723d07a91ec4a41a0002399bcf2c  packages/cli/test/ardent-application.test.ts
 new       b8a9c4cb2b21c9dea425b774da627d7dec74575b94825c97fad1dd0180c84303  packages/cli/test/ardent-authorization.test.ts
 new       ec10192470e5a39de2d03e2e293d97ce863704caefab116994ae33911ba6f269  packages/cli/test/ardent-banner.test.ts
@@ -65,6 +67,7 @@ new       4fa9d1ea48e5f461a593d480c6cc05c7b42f459ee54a828b6b7aa89f1fdfd910  pack
 new       94cc8610d379d105fa4b0814ad246a971c2937c3cc5c8ad9995e0da88f84e53a  packages/cli/test/ardent-dashboard.test.ts
 new       aeb55332f435848b9107071e269fcb904c633786c49b5a729502414487878f17  packages/cli/test/ardent-eval-fixture.test.ts
 new       15be055ed0888c15cdb33a3da34249e3068e65dd9345ed056d368b0379d97215  packages/cli/test/ardent-eval-protocol.test.ts
+new       a4a0735d3fae7b16ac0dee7f7eeff0d46bdf829c92d4d8c3b5e1d2b44c3db762  packages/cli/test/ardent-eval-scenarios.test.ts
 new       aebb741496548a903c37281d1df5d2e628070d3205dba2d1e4718b3b0041696a  packages/cli/test/ardent-evidence-ownership.test.ts
 new       ed1ec3d254452b44f404cf532aa2b1393bcb9ca9a65366cd79d4562aff6dcced  packages/cli/test/ardent-evidence.test.ts
 new       ba7b4f87e086a1f0cbfeff37159f81647469419cad733e8cf58065a9104b12be  packages/cli/test/ardent-extension.test.ts

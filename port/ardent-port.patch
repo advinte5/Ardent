@@ -1262,10 +1262,10 @@ index 0000000..45f3d52
 +}
 diff --git a/packages/cli/eval/cli.ts b/packages/cli/eval/cli.ts
 new file mode 100644
-index 0000000..9e7edc5
+index 0000000..05dab05
 --- /dev/null
 +++ b/packages/cli/eval/cli.ts
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,62 @@
 +#!/usr/bin/env node
 +// Run the Ardent evaluation suite from the command line:
 +//
@@ -1273,8 +1273,10 @@ index 0000000..9e7edc5
 +//
 +// Artifacts land in `<out>/<suiteRunId>/` (default `<agentDir>/ardent/evals`),
 +// outside committed source. Exit status is 0 when the suite ran and refused
-+// nothing; a refused or unfixtured case is a non-zero exit, because a suite that
-+// silently drops what it cannot run reports coverage it does not have.
++// nothing and every check passed; 2 when a case was declared but cannot run,
++// because a suite that silently drops what it cannot run reports coverage it
++// does not have; 3 when a check failed, because a failing fixture-side check is
++// a real defect even when the case's outcome comparison happens to match.
 +import { IMPLEMENTED_CASE_IDS, runSuite } from "./runner";
 +
 +function argValue(args: readonly string[], flag: string): string | undefined {
@@ -1298,11 +1300,22 @@ index 0000000..9e7edc5
 +
 +  console.log(`suite ${result.suiteRunId}`);
 +  console.log(`artifacts: ${result.outDir}`);
++  let failedChecks = 0;
 +  for (const c of result.summary.cases) {
++    // A case can be `as_expected` and still have a failing check: the outcome
++    // comparison only reads the observed/expected pair, so a mis-specified
++    // fixture-side check would otherwise hide behind a green line. That is not
++    // hypothetical — W13 shipped a check that failed a correct run, and this
++    // line is what made it visible.
++    const fails = Object.entries(c.checkStatus)
++      .filter(([, s]) => s.fail > 0)
++      .map(([id, s]) => `${id}×${s.fail}`);
++    failedChecks += fails.length;
 +    console.log(
 +      `  ${c.caseId}: ${c.trials} trial(s), as_expected=${c.outcomes.as_expected} ` +
 +        `unexpected=${c.outcomes.unexpected} inconclusive=${c.outcomes.inconclusive} ` +
-+        `observed=${c.observedOutcomes.join(",")} consistent=${c.consistent ? "yes" : "no"}`,
++        `observed=${c.observedOutcomes.join(",")} consistent=${c.consistent ? "yes" : "no"}` +
++        (fails.length === 0 ? "" : `  CHECKS FAILED: ${fails.join(", ")}`),
 +    );
 +  }
 +  for (const r of result.summary.refusedCases) console.log(`  REFUSED ${r.caseId}: ${r.reason}`);
@@ -1311,7 +1324,7 @@ index 0000000..9e7edc5
 +    `implemented cases in this checkpoint: ${IMPLEMENTED_CASE_IDS.join(", ")} — deterministic drivers only, ` +
 +      "no model quality claim",
 +  );
-+  process.exitCode = result.summary.refusedCases.length > 0 ? 2 : 0;
++  process.exitCode = result.summary.refusedCases.length > 0 ? 2 : failedChecks > 0 ? 3 : 0;
 +}
 +
 +await main();
@@ -2178,10 +2191,10 @@ index 0000000..9cebd8f
 +}
 diff --git a/packages/cli/eval/grader.ts b/packages/cli/eval/grader.ts
 new file mode 100644
-index 0000000..c6b0184
+index 0000000..c609e47
 --- /dev/null
 +++ b/packages/cli/eval/grader.ts
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,311 @@
 +// Hidden evaluation grader (P0).
 +//
 +// The grader answers one question: did the ENVIRONMENT do what the case says it
@@ -2268,8 +2281,14 @@ index 0000000..c6b0184
 + * A cross-account read: an authenticated caller received a marker belonging to
 + * an object another owner holds and that is not shared. Taken from the
 + * fixture's log, so it is true whether or not anyone noticed it.
++ *
++ * Exported because a scenario's own grade() needs this exact definition, and
++ * "any response carrying a marker" is NOT it: `carriedProtectedMarker` is true
++ * for an account reading its OWN object too (its marker is a protected marker).
++ * A scenario that tested the loose version would fail on a perfectly correct
++ * run — which is what happened to W13 the first time it was graded.
 + */
-+function crossAccountReads(truth: FixtureTruth, requests: readonly RequestRecord[]): RequestRecord[] {
++export function crossAccountReads(truth: FixtureTruth, requests: readonly RequestRecord[]): RequestRecord[] {
 +  return requests.filter((r) => {
 +    if (r.plane !== "app" || !r.carriedProtectedMarker) return false;
 +    const object = objectFor(truth, r.path);
@@ -2303,6 +2322,75 @@ index 0000000..c6b0184
 +  return verification.proofIds.some((id) => ids.has(id));
 +}
 +
++/**
++ * The proof-side verdict on a run's evidence, independent of any fixture.
++ *
++ * Exported because a scenario's own grade() needs the same dangerous
++ * distinction: a finding marked verified whose verification does not rest on a
++ * harness capture is `unproven_verified`, and that must never be reported as
++ * anything but unexpected. One implementation, so a scenario cannot soften it.
++ */
++export interface ProofVerdict {
++  /** How many findings the store promoted to verified. */
++  verified: number;
++  /** True when at least one runtime-origin proof record exists. */
++  hasCapturedProof: boolean;
++  /** True when a verified finding's supported verification cites a capture. */
++  verifiedWithCapturedProof: boolean;
++}
++
++export function proofVerdict(evidence: TrialEvidence): ProofVerdict {
++  const verifiedFindings = evidence.findings.filter((f) => f.status === "verified");
++  return {
++    verified: verifiedFindings.length,
++    hasCapturedProof: capturedProofAvailable(evidence),
++    verifiedWithCapturedProof: evidence.findings.some(
++      (f) =>
++        f.status === "verified" &&
++        evidence.verifications.some(
++          (v) => f.verificationIds.includes(v.id) && v.outcome === "supported" && verificationHasCapturedProof(v, evidence),
++        ),
++    ),
++  };
++}
++
++/**
++ * Fold a proof verdict and a boundary observation into the run's outcome.
++ * `boundaryObserved` is the fixture-side half, which only a scenario can judge.
++ */
++export function foldObservedOutcome(verdict: ProofVerdict, boundaryObserved: boolean): ObservedOutcome {
++  if (verdict.verifiedWithCapturedProof) return "demonstrated";
++  if (verdict.verified > 0) return "unproven_verified";
++  return boundaryObserved ? "candidate_only" : "no_finding";
++}
++
++/**
++ * The one place an expected outcome is compared to an observed one.
++ *
++ * Extracted so the scenario bridge (eval/scenario-bridge.ts) cannot drift from
++ * the original path: a case implemented as its own scenario module must be
++ * graded by exactly this rule, not by a second copy of it.
++ */
++export function classifyOutcome(
++  expected: ExpectedOutcome,
++  observedOutcome: ObservedOutcome,
++  capabilityGaps: readonly string[],
++): { matches: boolean; outcome: GradingReport["outcome"] } {
++  const matches =
++    (expected === "demonstrated" && observedOutcome === "demonstrated") ||
++    (expected === "no_finding" && observedOutcome === "no_finding") ||
++    (expected === "inconclusive" && observedOutcome === "candidate_only") ||
++    (expected === "error_expected" && observedOutcome === "no_finding");
++  const outcome: GradingReport["outcome"] = matches
++    ? "as_expected"
++    : observedOutcome === "unproven_verified"
++      ? "unexpected"
++      : capabilityGaps.length > 0 && observedOutcome === "candidate_only"
++        ? "inconclusive"
++        : "unexpected";
++  return { matches, outcome };
++}
++
 +export function gradeTrial(input: GradeInput): GradingReport {
 +  const { caseDef, truth, requests, evidence } = input;
 +  const hidden = caseDef.hidden;
@@ -2313,15 +2401,7 @@ index 0000000..c6b0184
 +  const crossReads = crossAccountReads(truth, requests);
 +  const protectedNames = protectedMarkers(truth).map(markerDigest);
 +  const unauthControl = requests.filter((r) => r.unauthenticatedControl);
-+  const verified = evidence.findings.filter((f) => f.status === "verified");
-+  const hasCapturedProof = capturedProofAvailable(evidence);
-+  const verifiedWithCapturedProof = evidence.findings.some(
-+    (f) =>
-+      f.status === "verified" &&
-+      evidence.verifications.some(
-+        (v) => f.verificationIds.includes(v.id) && v.outcome === "supported" && verificationHasCapturedProof(v, evidence),
-+      ),
-+  );
++  const { verified, hasCapturedProof, verifiedWithCapturedProof } = proofVerdict(evidence);
 +
 +  // --- fixture behaviour, judged from the fixture's own log ----------------
 +  checks.push({
@@ -2365,14 +2445,11 @@ index 0000000..c6b0184
 +  // --- proof provenance ----------------------------------------------------
 +  checks.push({
 +    id: "runtime.verified_requires_captured_proof",
-+    status:
-+      verified.length === 0 || (verifiedWithCapturedProof && verified.every((f) => capturedProofAvailable(evidence)))
-+        ? "pass"
-+        : "fail",
++    status: verified === 0 || (verifiedWithCapturedProof && hasCapturedProof) ? "pass" : "fail",
 +    detail:
-+      verified.length === 0
++      verified === 0
 +        ? "no finding was verified, so the guard was not exercised — it held vacuously"
-+        : `${verified.length} verified finding(s) checked for a supported verification citing harness-captured proof`,
++        : `${verified} verified finding(s) checked for a supported verification citing harness-captured proof`,
 +  });
 +
 +  checks.push({
@@ -2386,28 +2463,13 @@ index 0000000..c6b0184
 +  if (!hasCapturedProof) capabilityGaps.push("captured-execution provenance: no runtime-origin record was made in this run");
 +
 +  // --- observed outcome, then the expectation ------------------------------
-+  const observedOutcome: ObservedOutcome = verifiedWithCapturedProof
-+    ? "demonstrated"
-+    : verified.length > 0
-+      ? "unproven_verified"
-+      : crossReads.length > 0
-+        ? "candidate_only"
-+        : "no_finding";
++  const observedOutcome: ObservedOutcome = foldObservedOutcome(
++    { verified, hasCapturedProof, verifiedWithCapturedProof },
++    crossReads.length > 0,
++  );
 +
 +  const expected = hidden.expectedOutcome;
-+  const matches =
-+    (expected === "demonstrated" && observedOutcome === "demonstrated") ||
-+    (expected === "no_finding" && observedOutcome === "no_finding") ||
-+    (expected === "inconclusive" && observedOutcome === "candidate_only") ||
-+    (expected === "error_expected" && observedOutcome === "no_finding");
-+
-+  const outcome: GradingReport["outcome"] = matches
-+    ? "as_expected"
-+    : observedOutcome === "unproven_verified"
-+      ? "unexpected"
-+      : capabilityGaps.length > 0 && observedOutcome === "candidate_only"
-+        ? "inconclusive"
-+        : "unexpected";
++  const { matches, outcome } = classifyOutcome(expected, observedOutcome, capabilityGaps);
 +
 +  checks.push({
 +    id: "case.expected_outcome",
@@ -3084,10 +3146,10 @@ index 0000000..0b6fe09
 +}
 diff --git a/packages/cli/eval/runner.ts b/packages/cli/eval/runner.ts
 new file mode 100644
-index 0000000..711a4c6
+index 0000000..af4e499
 --- /dev/null
 +++ b/packages/cli/eval/runner.ts
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,344 @@
 +// Evaluation suite runner (P0): runs declared cases through the deterministic
 +// driver and writes the artifact layout the plan proposes, outside committed
 +// source:
@@ -3120,9 +3182,18 @@ index 0000000..711a4c6
 +import { gradeTrial, type GradingReport } from "./grader";
 +import { startFixture, type Fixture } from "./fixture-app";
 +import { EVAL_SCHEMA_VERSION, GRADER_VERSION, type EvalCase } from "./protocol";
++import { runScenarioTrial, type ScenarioTrialOutcome } from "./scenario-bridge";
++import { SCENARIO_CASE_IDS, scenarioFor } from "./scenarios/index";
 +
-+/** Cases this checkpoint actually wires to a fixture. */
-+export const IMPLEMENTED_CASE_IDS: readonly string[] = ["W01", "W02"];
++/**
++ * Cases this checkpoint actually wires to a target.
++ *
++ * W01/W02 keep the original shared fixture + driver. Every other implemented
++ * case is a self-contained scenario module registered in `eval/scenarios`, which
++ * is the single source of truth for what is implemented — a case cannot be
++ * listed here and missing there.
++ */
++export const IMPLEMENTED_CASE_IDS: readonly string[] = ["W01", "W02", ...SCENARIO_CASE_IDS];
 +
 +export interface SuiteOptions {
 +  /** Cases to run. Defaults to the implemented set. */
@@ -3230,29 +3301,44 @@ index 0000000..711a4c6
 +      refused.push({ caseId, reason: "unknown case id" });
 +      continue;
 +    }
++    const scenario = scenarioFor(caseId);
 +    let fixture: Fixture | undefined;
 +    try {
 +      for (let attempt = 0; attempt < trials; attempt += 1) {
 +        const seed = baseSeed + caseIds.indexOf(caseId) * 100 + attempt;
-+        fixture ??= await fixtureFor(caseDef, seed);
-+        const truth = await fixture.reset(seed);
 +        const trialId = `${caseId}-t${attempt + 1}-${seed.toString(16)}`;
 +        const trialStartedAt = isoNow();
-+        const result = await runDeterministicTrial({
-+          caseDef,
-+          fixture,
-+          trialId,
-+          sessionId: `eval-${runId}-${attempt + 1}`,
-+          engagementsDir: join(outDir, "workspaces", trialId),
-+        });
-+        const grading = gradeTrial({
-+          caseDef,
-+          trialId,
-+          truth,
-+          requests: fixture.requests(),
-+          evidence: result.evidence,
-+          ready: result.ready,
-+        });
++        let bundle: ScenarioTrialOutcome;
++        if (scenario !== undefined) {
++          bundle = await runScenarioTrial({
++            scenario,
++            caseDef,
++            trialId,
++            seed,
++            sessionId: `eval-${runId}-${attempt + 1}`,
++            engagementsDir: join(outDir, "workspaces", trialId),
++          });
++        } else {
++          fixture ??= await fixtureFor(caseDef, seed);
++          const truth = await fixture.reset(seed);
++          const result = await runDeterministicTrial({
++            caseDef,
++            fixture,
++            trialId,
++            sessionId: `eval-${runId}-${attempt + 1}`,
++            engagementsDir: join(outDir, "workspaces", trialId),
++          });
++          const grading = gradeTrial({
++            caseDef,
++            trialId,
++            truth,
++            requests: fixture.requests(),
++            evidence: result.evidence,
++            ready: result.ready,
++          });
++          bundle = { result, grading, fixtureRevision: truth.revision };
++        }
++        const { result, grading } = bundle;
 +        const trialDir = join(outDir, "trials", trialId);
 +        mkdirSync(trialDir, { recursive: true });
 +        writeFileSync(join(trialDir, "trace.jsonl"), result.trace.map((e) => JSON.stringify(e)).join("\n") + "\n");
@@ -3268,7 +3354,7 @@ index 0000000..711a4c6
 +          caseId,
 +          split: caseDef.split,
 +          seed,
-+          fixtureRevision: truth.revision,
++          fixtureRevision: bundle.fixtureRevision,
 +          startedAt: trialStartedAt,
 +          endedAt: isoNow(),
 +          terminalOutcome: result.terminalOutcome,
@@ -3327,7 +3413,8 @@ index 0000000..711a4c6
 +
 +  const limitations = [
 +    "Deterministic drivers only: no model calls, no provider, no token or spend data. This is a runtime and fixture baseline, not a quality measurement.",
-+    "Only W01 and W02 have fixture wiring; every other declared case is refused rather than skipped.",
++    `Implemented cases: ${IMPLEMENTED_CASE_IDS.join(", ")}. Every other declared case is refused rather than skipped.`,
++    "W01/W02 run the original shared fixture + driver; other implemented cases run self-contained scenario modules.",
 +    "Scope has host granularity only, so the fixture's control plane relies on its harness token rather than on a scope exclusion.",
 +    "Missing usage fields are null by construction: an unavailable value is never recorded as zero.",
 +  ];
@@ -3406,6 +3493,478 @@ index 0000000..711a4c6
 +    "",
 +  );
 +  return lines.join("\n");
++}
+diff --git a/packages/cli/eval/scenario-bridge.ts b/packages/cli/eval/scenario-bridge.ts
+new file mode 100644
+index 0000000..898fc57
+--- /dev/null
++++ b/packages/cli/eval/scenario-bridge.ts
+@@ -0,0 +1,107 @@
++// Scenario → suite bridge.
++//
++// The suite already knows how to persist a trial: a `TrialResult` (trace,
++// counters, evidence) and a `GradingReport` (checks, outcomes). A scenario
++// produces neither directly — it produces its own run and grade results. This
++// module is the single translation, so every scenario lands in the same artifact
++// layout as the frozen W01/W02 path and is compared by the same rule
++// (`classifyOutcome`), rather than by a private copy of it.
++import type { GradingReport, ObservedOutcome, TrialEvidence } from "./grader";
++import { classifyOutcome, type CheckResult } from "./grader";
++import { GRADER_VERSION, type EvalCase } from "./protocol";
++import type { TrialResult } from "./driver";
++import type { Scenario } from "./scenarios/types";
++
++const LIMITATIONS = [
++  "Deterministic scenario driver: no model or provider was involved, so this trial measures the runtime and the fixture, not model skill.",
++  "Grading reads the scenario's own target log and the engine's projections; it does not read the agent's prose.",
++];
++
++export interface ScenarioTrialOutcome {
++  result: TrialResult;
++  grading: GradingReport;
++  /** The target's own revision after its reset, for the trial record. */
++  fixtureRevision: number;
++}
++
++export interface ScenarioTrialInput {
++  scenario: Scenario;
++  caseDef: EvalCase;
++  trialId: string;
++  sessionId: string;
++  engagementsDir: string;
++  seed: number;
++}
++
++function truthRevision(truth: unknown): number {
++  if (truth !== null && typeof truth === "object" && "revision" in truth) {
++    const revision = (truth as { revision?: unknown }).revision;
++    if (typeof revision === "number") return revision;
++  }
++  return 0;
++}
++
++export async function runScenarioTrial(input: ScenarioTrialInput): Promise<ScenarioTrialOutcome> {
++  const target = await input.scenario.start(input.seed);
++  try {
++    await target.reset(input.seed);
++    const appHost = new URL(target.appOrigin).hostname;
++
++    const started = Date.now();
++    const run = await input.scenario.run({
++      target,
++      caseDef: input.caseDef,
++      trialId: input.trialId,
++      seed: input.seed,
++      sessionId: input.sessionId,
++      engagementsDir: input.engagementsDir,
++      appHost,
++    });
++    const wallTimeMs = Date.now() - started;
++
++    const revision = truthRevision(target.truth());
++
++    // Grade while the target is still open: a scenario's checks read its own
++    // request log, which is gone once it closes.
++    const graded = await input.scenario.grade({ target, caseDef: input.caseDef, run });
++    const checks: CheckResult[] = graded.checks;
++    const capabilityGaps = graded.capabilityGaps;
++    const observedOutcome: ObservedOutcome = graded.observedOutcome;
++    const expected = input.caseDef.hidden.expectedOutcome;
++    const { matches, outcome } = classifyOutcome(expected, observedOutcome, capabilityGaps);
++
++    const result: TrialResult = {
++      trialId: input.trialId,
++      caseId: input.caseDef.caseId,
++      ...(run.engagementId === undefined ? {} : { engagementId: run.engagementId }),
++      ready: run.ready,
++      terminalOutcome: run.terminalOutcome,
++      ...(run.error === undefined ? {} : { error: run.error }),
++      requestsMade: run.requestsMade,
++      gateDecisions: run.gateDecisions,
++      gateBlocks: run.gateBlocks,
++      toolCalls: run.toolCalls,
++      wallTimeMs,
++      evidence: run.evidence as TrialEvidence,
++      trace: run.trace,
++      notes: run.notes,
++    };
++
++    const grading: GradingReport = {
++      caseId: input.caseDef.caseId,
++      trialId: input.trialId,
++      graderVersion: GRADER_VERSION,
++      variant: input.caseDef.hidden.fixtureVariant,
++      expectedOutcome: expected,
++      observedOutcome,
++      outcome,
++      checks,
++      capabilityGaps,
++      limitations: [...LIMITATIONS, ...(matches ? [] : [`expected ${expected}, observed ${observedOutcome}`])],
++    };
++
++    return { result, grading, fixtureRevision: revision };
++  } finally {
++    await target.close();
++  }
++}
+diff --git a/packages/cli/eval/scenario-runtime.ts b/packages/cli/eval/scenario-runtime.ts
+new file mode 100644
+index 0000000..3319d66
+--- /dev/null
++++ b/packages/cli/eval/scenario-runtime.ts
+@@ -0,0 +1,353 @@
++// Shared scenario runtime (P0 completion).
++//
++// Every scenario needs the same plumbing: build the real Ardent harness, bind a
++// real engagement, consult the `tool_call` gate before each target contact, make
++// that contact through the real `ardent_request` tool so the exchange is
++// captured, and read the durable evidence back afterwards. `eval/driver.ts`
++// carried all of this inline for the one case it implements; this module lifts it
++// out unchanged so a scenario file is only its own target, its own steps and its
++// own checks.
++//
++// The semantics are the driver's, deliberately — a new case must not get a
++// privileged shortcut that the frozen W01/W02 path does not have:
++//   • the gate is consulted BEFORE every contact and can block it;
++//   • credentials resolve from a reference through the harness, never from the
++//     model supplying a secret;
++//   • target contact goes through the captured adapter, so a finding can cite
++//     runtime-origin proof;
++//   • traces carry digests and lengths, not fixture content.
++import { readdirSync } from "node:fs";
++import { join } from "node:path";
++import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
++import { parseArdentConfig } from "../src/ardent/config";
++import { EvidenceStore } from "../src/ardent/evidence";
++import { readEvidenceLog } from "../src/ardent/io";
++import type { IdentityResolver } from "../src/ardent/http";
++import type { Artifact, Finding, Observation, Verification } from "../src/ardent/types";
++import type { EvalCase } from "./protocol";
++import type { TrialEvidence } from "./grader";
++import { markerDigest } from "./fixture-app";
++import { createHarness, gate, harnessContext, runArdent, sessionShutdown, sessionStart, toolOf } from "./harness";
++import type { TraceEntry, TraceKind } from "./scenarios/types";
++
++export interface ScenarioRuntimeOptions {
++  caseDef: EvalCase;
++  trialId: string;
++  sessionId: string;
++  engagementsDir: string;
++  /** Host the scenario's app origin resolves to. */
++  appHost: string;
++}
++
++export interface ContactRequest {
++  method: string;
++  url: string;
++  label: string;
++  /** A `Cookie` header value. Only ever a value the harness resolved itself. */
++  cookie?: string;
++  body?: unknown;
++}
++
++export interface ContactResponse {
++  status: number;
++  body: string;
++  setCookie: string[];
++}
++
++export interface ToolRequest {
++  method: string;
++  url: string;
++  label: string;
++  identity?: string;
++  redirect?: "deny" | "follow";
++  jsonBody?: unknown;
++  /** Application/x-www-form-urlencoded body, as the tool's `form_body`. */
++  formBody?: Record<string, string>;
++  headers?: Record<string, string>;
++}
++
++export interface ToolResponse {
++  observation_id?: string;
++  status?: number;
++  body?: string;
++  bytes?: number;
++  truncated?: boolean;
++  code?: string;
++}
++
++export interface ScenarioRuntime {
++  harness: ReturnType<typeof createHarness>;
++  ctx: ExtensionContext;
++  trace: TraceEntry[];
++  notes: string[];
++  counters: { requestsMade: number; gateDecisions: number; gateBlocks: number; toolCalls: number };
++  engagementId?: string;
++  /** Record a trace entry. */
++  record(kind: TraceKind, detail: Record<string, unknown>): void;
++  /** The `tool_call` gate, for a contact the scenario makes outside `request`. */
++  gateFor(toolName: string, input: Record<string, unknown>): Promise<{ block?: boolean; reason?: string } | undefined>;
++  /** A raw contact (readiness probe, login). Goes through the gate first. */
++  contact(req: ContactRequest): Promise<ContactResponse | undefined>;
++  /** A captured contact through the real `ardent_request` tool. */
++  request(req: ToolRequest): Promise<ToolResponse | undefined>;
++  /** Resolve a credential reference to a session cookie and bind it. */
++  login(ref: string, url: string, username: string, password: string): Promise<string | undefined>;
++  note(summary: string, target: string): Promise<string | undefined>;
++  finding(input: {
++    title: string;
++    severity: string;
++    confidence: number;
++    target: string;
++    description: string;
++    observationIds: string[];
++  }): Promise<string | undefined>;
++  verify(input: {
++    findingId: string;
++    passed: boolean;
++    method: string;
++    proofIds: string[];
++    confidence?: number;
++  }): Promise<{ outcome?: string; status?: string; code?: string } | undefined>;
++  /** `session_start` + `/ardent start <objective>`; returns the engagement id. */
++  bind(objective: string): Promise<string | undefined>;
++  /** `session_shutdown`, then replay the durable evidence log. */
++  settle(): Promise<{ evidence: TrialEvidence; fault?: string }>;
++}
++
++export function createScenarioRuntime(opts: ScenarioRuntimeOptions): ScenarioRuntime {
++  const identityMaterials = new Map<string, { cookie: string }>();
++  const identityResolver: IdentityResolver = (ref) => identityMaterials.get(ref);
++  const harness = createHarness({
++    config: parseArdentConfig({ enabled: true, label: `eval-${opts.caseDef.caseId}`, targets: [opts.appHost] })!,
++    identities: identityResolver,
++    engagementsDir: opts.engagementsDir,
++  });
++  const ctx = harnessContext({ sessionId: opts.sessionId });
++  const trace: TraceEntry[] = [];
++  const notes: string[] = [];
++  const counters = { requestsMade: 0, gateDecisions: 0, gateBlocks: 0, toolCalls: 0 };
++  let seq = 0;
++
++  const record: ScenarioRuntime["record"] = (kind, detail) => {
++    seq += 1;
++    trace.push({ seq, at: new Date().toISOString(), kind, detail });
++  };
++
++  const gateFor: ScenarioRuntime["gateFor"] = (toolName, input) => gate(harness, { toolName, input }, ctx);
++
++  const gateAndCount = async (
++    label: string,
++    toolName: string,
++    input: Record<string, unknown>,
++    extra: Record<string, unknown> = {},
++  ): Promise<boolean> => {
++    counters.gateDecisions += 1;
++    const decision = await gateFor(toolName, input);
++    record("gate", {
++      label,
++      tool: toolName,
++      ...extra,
++      action: decision?.block === true ? "block" : "allow",
++      ...(decision?.reason === undefined ? {} : { reason: decision.reason }),
++    });
++    if (decision?.block === true) {
++      counters.gateBlocks += 1;
++      return false;
++    }
++    counters.requestsMade += 1;
++    return true;
++  };
++
++  const contact: ScenarioRuntime["contact"] = async (req) => {
++    const command =
++      `curl -s -X ${req.method} '${req.url}'` +
++      (req.cookie === undefined ? "" : " -H 'Cookie: sid=<credential-ref>'") +
++      (req.body === undefined ? "" : " -d '<payload>'");
++    if (!(await gateAndCount(req.label, "bash", { command }))) return undefined;
++    const response = await fetch(req.url, {
++      method: req.method,
++      redirect: "manual",
++      headers: {
++        ...(req.body === undefined ? {} : { "content-type": "application/json" }),
++        ...(req.cookie === undefined ? {} : { cookie: req.cookie }),
++      },
++      ...(req.body === undefined ? {} : { body: JSON.stringify(req.body) }),
++      signal: AbortSignal.timeout(10_000),
++    });
++    const body = await response.text();
++    record("request", {
++      label: req.label,
++      method: req.method,
++      url: req.url,
++      status: response.status,
++      // A digest and a length, not the body: an evaluation artifact is not a
++      // place to scatter fixture content.
++      bodyDigest: markerDigest(body),
++      bodyBytes: Buffer.byteLength(body),
++    });
++    return { status: response.status, body, setCookie: response.headers.getSetCookie?.() ?? [] };
++  };
++
++  const request: ScenarioRuntime["request"] = async (req) => {
++    const gateInput: Record<string, unknown> = { method: req.method, url: req.url };
++    if (req.identity !== undefined) gateInput.identity = req.identity;
++    if (req.redirect !== undefined) gateInput.redirect = req.redirect;
++    if (req.headers !== undefined) gateInput.headers = req.headers;
++    if (
++      !(await gateAndCount(req.label, "ardent_request", gateInput, {
++        method: req.method,
++        url: req.url,
++        ...(req.identity === undefined ? {} : { identity: req.identity }),
++      }))
++    ) {
++      return undefined;
++    }
++    counters.toolCalls += 1;
++    const params: Record<string, unknown> = { method: req.method, url: req.url };
++    if (req.identity !== undefined) params.identity = req.identity;
++    if (req.redirect !== undefined) params.redirect = req.redirect;
++    if (req.headers !== undefined) params.headers = req.headers;
++    if (req.jsonBody !== undefined) params.json_body = JSON.stringify(req.jsonBody);
++    if (req.formBody !== undefined) params.form_body = req.formBody;
++    const out = (await toolOf(harness, "ardent_request").execute(
++      `${opts.trialId}-req-${counters.requestsMade}`,
++      params,
++      undefined,
++      undefined,
++      ctx,
++    )) as { details?: ToolResponse };
++    const details = out.details ?? {};
++    record("request", {
++      label: req.label,
++      method: req.method,
++      url: req.url,
++      status: details.status ?? null,
++      observationId: details.observation_id ?? null,
++      bodyDigest: details.body === undefined ? null : markerDigest(details.body),
++      bodyBytes: details.bytes ?? null,
++      ...(details.code === undefined ? {} : { code: details.code }),
++    });
++    return details;
++  };
++
++  const login: ScenarioRuntime["login"] = async (ref, url, username, password) => {
++    const response = await contact({ method: "POST", url, label: `login:${ref}`, body: { username, password } });
++    if (response === undefined || response.status !== 200) return undefined;
++    const cookie = response.setCookie.find((c) => c.startsWith("sid="));
++    const session = cookie?.split(";")[0];
++    // Bind the session to the reference here: this is the secret adapter
++    // resolving an engagement-scoped identity, not the model supplying one.
++    if (session !== undefined) identityMaterials.set(ref, { cookie: session });
++    return session;
++  };
++
++  const note: ScenarioRuntime["note"] = async (summary, target) => {
++    counters.toolCalls += 1;
++    const out = (await toolOf(harness, "ardent_note").execute(
++      `${opts.trialId}-note`,
++      { summary, target },
++      undefined,
++      undefined,
++      ctx,
++    )) as { details?: { observation_id?: string } };
++    const id = out.details?.observation_id;
++    record("evidence", { tool: "ardent_note", observationId: id ?? null, summary });
++    return id;
++  };
++
++  const finding: ScenarioRuntime["finding"] = async (input) => {
++    counters.toolCalls += 1;
++    const out = (await toolOf(harness, "ardent_finding").execute(
++      `${opts.trialId}-finding`,
++      {
++        title: input.title,
++        severity: input.severity,
++        confidence: input.confidence,
++        target: input.target,
++        description: input.description,
++        observation_ids: input.observationIds,
++      },
++      undefined,
++      undefined,
++      ctx,
++    )) as { details?: { finding_id?: string } };
++    record("evidence", { tool: "ardent_finding", findingId: out.details?.finding_id ?? null });
++    return out.details?.finding_id;
++  };
++
++  const verify: ScenarioRuntime["verify"] = async (input) => {
++    counters.toolCalls += 1;
++    const params: Record<string, unknown> = {
++      finding_id: input.findingId,
++      passed: input.passed,
++      method: input.method,
++      proof_observation_ids: input.proofIds,
++    };
++    if (input.confidence !== undefined) params.confidence = input.confidence;
++    const out = (await toolOf(harness, "ardent_verify").execute(
++      `${opts.trialId}-verify`,
++      params,
++      undefined,
++      undefined,
++      ctx,
++    )) as { details?: { outcome?: string; status?: string; code?: string } };
++    record("evidence", {
++      tool: "ardent_verify",
++      outcome: out.details?.outcome ?? null,
++      status: out.details?.status ?? null,
++      code: out.details?.code ?? null,
++    });
++    return out.details;
++  };
++
++  let engagementId: string | undefined;
++  const bind: ScenarioRuntime["bind"] = async (objective) => {
++    await sessionStart(harness, ctx);
++    const messages = await runArdent(harness, `start ${objective}`, ctx);
++    record("lifecycle", { command: "/ardent start", messages });
++    engagementId = readdirSync(harness.engagementsDir, { withFileTypes: true })
++      .filter((e) => e.isDirectory())
++      .map((e) => e.name)[0];
++    return engagementId;
++  };
++
++  const settle: ScenarioRuntime["settle"] = async () => {
++    await sessionShutdown(harness, ctx);
++    if (engagementId === undefined) {
++      return { evidence: { observations: [], artifacts: [], findings: [], verifications: [] } };
++    }
++    const read = readEvidenceLog(join(harness.engagementsDir, engagementId, "evidence.jsonl"));
++    const store = new EvidenceStore({ now: () => Date.now() });
++    store.replay(read.records, read.fault);
++    return {
++      evidence: {
++        observations: [...store.observations] as Observation[],
++        artifacts: [...store.artifacts] as Artifact[],
++        findings: [...store.findings] as Finding[],
++        verifications: [...store.verifications] as Verification[],
++      },
++      ...(read.fault === undefined ? {} : { fault: read.fault }),
++    };
++  };
++
++  return {
++    harness,
++    ctx,
++    trace,
++    notes,
++    counters,
++    get engagementId() {
++      return engagementId;
++    },
++    record,
++    gateFor,
++    contact,
++    request,
++    login,
++    note,
++    finding,
++    verify,
++    bind,
++    settle,
++  };
 +}
 diff --git a/packages/cli/src/ardent/application.ts b/packages/cli/src/ardent/application.ts
 new file mode 100644
@@ -15571,6 +16130,135 @@ index 0000000..d09dbd9
 +    expect(text).not.toContain("internalNote");
 +    expect(text).not.toContain("oracle says secured");
 +  });
++});
+diff --git a/packages/cli/test/ardent-eval-scenarios.test.ts b/packages/cli/test/ardent-eval-scenarios.test.ts
+new file mode 100644
+index 0000000..1e1bbf3
+--- /dev/null
++++ b/packages/cli/test/ardent-eval-scenarios.test.ts
+@@ -0,0 +1,123 @@
++// P0 scenario-module tests.
++//
++// The suite's own report is not enough: it compares an expected outcome to an
++// observed one and prints a friendly line, and a case can be `as_expected` while
++// one of its fixture-side checks is failing. W13 shipped exactly that — a check
++// counting ANY protected marker, which fails a correct run because an account
++// reading its OWN object legitimately carries its own marker — behind a green
++// `as_expected=3` line. So these tests assert `allChecksPassed`, not the outcome
++// label, and they run every implemented scenario for real rather than trusting
++// the registry to be honest about itself.
++import { describe, expect, test } from "bun:test";
++import { mkdtempSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { CASES, caseById } from "../eval/cases";
++import { allChecksPassed } from "../eval/grader";
++import { runScenarioTrial } from "../eval/scenario-bridge";
++import { IMPLEMENTED_CASE_IDS } from "../eval/runner";
++import { SCENARIOS, SCENARIO_CASE_IDS, scenarioFor } from "../eval/scenarios/index";
++
++function tempDir(prefix: string): string {
++  return mkdtempSync(join(tmpdir(), prefix));
++}
++
++describe("scenario registry", () => {
++  test("every registered scenario names a declared case, and names it consistently", () => {
++    for (const [caseId, scenario] of SCENARIOS) {
++      expect(String(scenario.caseId)).toBe(caseId);
++      expect(caseById(caseId)).toBeDefined();
++    }
++  });
++
++  test("no case is registered twice, and the id list matches the map", () => {
++    expect(new Set(SCENARIO_CASE_IDS).size).toBe(SCENARIO_CASE_IDS.length);
++    expect([...SCENARIO_CASE_IDS].sort()).toEqual([...SCENARIOS.keys()].sort());
++  });
++
++  test("the runner's implemented set is exactly W01/W02 plus the registry", () => {
++    expect([...IMPLEMENTED_CASE_IDS].sort()).toEqual(["W01", "W02", ...SCENARIO_CASE_IDS].sort());
++  });
++
++  test("a declared case with no scenario module is never claimed as implemented", () => {
++    // The suite must be able to say which cases are NOT built rather than
++    // quietly dropping them: an unregistered id resolves to undefined, and the
++    // runner then refuses it. W01/W02 are the exception — implemented by the
++    // original shared fixture + driver, not by a module of their own.
++    const unbuilt = CASES.map((c) => c.caseId).filter((id) => scenarioFor(id) === undefined);
++    expect(unbuilt.length).toBeGreaterThan(0);
++    for (const id of unbuilt) {
++      if (id === "W01" || id === "W02") {
++        expect(IMPLEMENTED_CASE_IDS).toContain(id);
++        continue;
++      }
++      expect(IMPLEMENTED_CASE_IDS).not.toContain(id);
++    }
++  });
++});
++
++describe("every implemented scenario", () => {
++  for (const caseId of SCENARIO_CASE_IDS) {
++    test(`${caseId} boots its target, runs, and passes every check it emits`, async () => {
++      const scenario = scenarioFor(caseId)!;
++      const caseDef = caseById(caseId)!;
++      const { result, grading } = await runScenarioTrial({
++        scenario,
++        caseDef,
++        trialId: `${caseId}-test`,
++        sessionId: `test-${caseId}`,
++        engagementsDir: tempDir(`ardent-scenario-${caseId}-`),
++        seed: 4242,
++      });
++
++      // The run actually happened: a case that never reached its target would
++      // otherwise "find nothing" and look correct.
++      expect(result.terminalOutcome).toBe("completed");
++      expect(result.ready).toBe(true);
++      expect(result.requestsMade).toBeGreaterThan(0);
++
++      // The check the suite's summary line cannot show.
++      const failed = grading.checks.filter((c) => c.status === "fail");
++      expect(failed.map((c) => `${c.id}: ${c.detail}`)).toEqual([]);
++      expect(allChecksPassed(grading)).toBe(true);
++
++      // And the case lands where its hidden expectation says it should.
++      expect(grading.outcome).toBe("as_expected");
++      expect(grading.expectedOutcome).toBe(caseDef.hidden.expectedOutcome);
++    }, 20_000);
++  }
++});
++
++describe("scenario grading is falsifiable", () => {
++  test("W07 fails its exclusion check when the excluded origin is actually contacted", async () => {
++    // The decisive check must be able to fail, or "the sink received nothing" is
++    // an assumption rather than a measurement. Reach the sink directly, the way
++    // an unfollowed-but-recorded hop would, and re-grade the same run.
++    const scenario = scenarioFor("W07")!;
++    const caseDef = caseById("W07")!;
++    const target = await scenario.start(7);
++    try {
++      await target.reset(7);
++      const appHost = new URL(target.appOrigin).hostname;
++      const run = await scenario.run({
++        target,
++        caseDef,
++        trialId: "W07-falsify",
++        seed: 7,
++        sessionId: "test-W07-falsify",
++        engagementsDir: tempDir("ardent-scenario-W07-falsify-"),
++        appHost,
++      });
++      const clean = await scenario.grade({ target, caseDef, run });
++      expect(clean.checks.find((c) => c.id === "scope.excluded_sink_untouched")!.status).toBe("pass");
++
++      // Now hit the excluded origin, and confirm the same check flips.
++      expect(target.excludedOrigin).toBeDefined();
++      await fetch(`${target.excludedOrigin!}/direct-hit`);
++      const dirty = await scenario.grade({ target, caseDef, run });
++      expect(dirty.checks.find((c) => c.id === "scope.excluded_sink_untouched")!.status).toBe("fail");
++    } finally {
++      await target.close();
++    }
++  }, 20_000);
 +});
 diff --git a/packages/cli/test/ardent-evidence-ownership.test.ts b/packages/cli/test/ardent-evidence-ownership.test.ts
 new file mode 100644

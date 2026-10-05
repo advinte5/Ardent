@@ -84,8 +84,14 @@ function objectFor(truth: FixtureTruth, path: string): FixtureTruth["objects"][n
  * A cross-account read: an authenticated caller received a marker belonging to
  * an object another owner holds and that is not shared. Taken from the
  * fixture's log, so it is true whether or not anyone noticed it.
+ *
+ * Exported because a scenario's own grade() needs this exact definition, and
+ * "any response carrying a marker" is NOT it: `carriedProtectedMarker` is true
+ * for an account reading its OWN object too (its marker is a protected marker).
+ * A scenario that tested the loose version would fail on a perfectly correct
+ * run — which is what happened to W13 the first time it was graded.
  */
-function crossAccountReads(truth: FixtureTruth, requests: readonly RequestRecord[]): RequestRecord[] {
+export function crossAccountReads(truth: FixtureTruth, requests: readonly RequestRecord[]): RequestRecord[] {
   return requests.filter((r) => {
     if (r.plane !== "app" || !r.carriedProtectedMarker) return false;
     const object = objectFor(truth, r.path);
@@ -119,6 +125,75 @@ function verificationHasCapturedProof(verification: Verification, evidence: Tria
   return verification.proofIds.some((id) => ids.has(id));
 }
 
+/**
+ * The proof-side verdict on a run's evidence, independent of any fixture.
+ *
+ * Exported because a scenario's own grade() needs the same dangerous
+ * distinction: a finding marked verified whose verification does not rest on a
+ * harness capture is `unproven_verified`, and that must never be reported as
+ * anything but unexpected. One implementation, so a scenario cannot soften it.
+ */
+export interface ProofVerdict {
+  /** How many findings the store promoted to verified. */
+  verified: number;
+  /** True when at least one runtime-origin proof record exists. */
+  hasCapturedProof: boolean;
+  /** True when a verified finding's supported verification cites a capture. */
+  verifiedWithCapturedProof: boolean;
+}
+
+export function proofVerdict(evidence: TrialEvidence): ProofVerdict {
+  const verifiedFindings = evidence.findings.filter((f) => f.status === "verified");
+  return {
+    verified: verifiedFindings.length,
+    hasCapturedProof: capturedProofAvailable(evidence),
+    verifiedWithCapturedProof: evidence.findings.some(
+      (f) =>
+        f.status === "verified" &&
+        evidence.verifications.some(
+          (v) => f.verificationIds.includes(v.id) && v.outcome === "supported" && verificationHasCapturedProof(v, evidence),
+        ),
+    ),
+  };
+}
+
+/**
+ * Fold a proof verdict and a boundary observation into the run's outcome.
+ * `boundaryObserved` is the fixture-side half, which only a scenario can judge.
+ */
+export function foldObservedOutcome(verdict: ProofVerdict, boundaryObserved: boolean): ObservedOutcome {
+  if (verdict.verifiedWithCapturedProof) return "demonstrated";
+  if (verdict.verified > 0) return "unproven_verified";
+  return boundaryObserved ? "candidate_only" : "no_finding";
+}
+
+/**
+ * The one place an expected outcome is compared to an observed one.
+ *
+ * Extracted so the scenario bridge (eval/scenario-bridge.ts) cannot drift from
+ * the original path: a case implemented as its own scenario module must be
+ * graded by exactly this rule, not by a second copy of it.
+ */
+export function classifyOutcome(
+  expected: ExpectedOutcome,
+  observedOutcome: ObservedOutcome,
+  capabilityGaps: readonly string[],
+): { matches: boolean; outcome: GradingReport["outcome"] } {
+  const matches =
+    (expected === "demonstrated" && observedOutcome === "demonstrated") ||
+    (expected === "no_finding" && observedOutcome === "no_finding") ||
+    (expected === "inconclusive" && observedOutcome === "candidate_only") ||
+    (expected === "error_expected" && observedOutcome === "no_finding");
+  const outcome: GradingReport["outcome"] = matches
+    ? "as_expected"
+    : observedOutcome === "unproven_verified"
+      ? "unexpected"
+      : capabilityGaps.length > 0 && observedOutcome === "candidate_only"
+        ? "inconclusive"
+        : "unexpected";
+  return { matches, outcome };
+}
+
 export function gradeTrial(input: GradeInput): GradingReport {
   const { caseDef, truth, requests, evidence } = input;
   const hidden = caseDef.hidden;
@@ -129,15 +204,7 @@ export function gradeTrial(input: GradeInput): GradingReport {
   const crossReads = crossAccountReads(truth, requests);
   const protectedNames = protectedMarkers(truth).map(markerDigest);
   const unauthControl = requests.filter((r) => r.unauthenticatedControl);
-  const verified = evidence.findings.filter((f) => f.status === "verified");
-  const hasCapturedProof = capturedProofAvailable(evidence);
-  const verifiedWithCapturedProof = evidence.findings.some(
-    (f) =>
-      f.status === "verified" &&
-      evidence.verifications.some(
-        (v) => f.verificationIds.includes(v.id) && v.outcome === "supported" && verificationHasCapturedProof(v, evidence),
-      ),
-  );
+  const { verified, hasCapturedProof, verifiedWithCapturedProof } = proofVerdict(evidence);
 
   // --- fixture behaviour, judged from the fixture's own log ----------------
   checks.push({
@@ -181,14 +248,11 @@ export function gradeTrial(input: GradeInput): GradingReport {
   // --- proof provenance ----------------------------------------------------
   checks.push({
     id: "runtime.verified_requires_captured_proof",
-    status:
-      verified.length === 0 || (verifiedWithCapturedProof && verified.every((f) => capturedProofAvailable(evidence)))
-        ? "pass"
-        : "fail",
+    status: verified === 0 || (verifiedWithCapturedProof && hasCapturedProof) ? "pass" : "fail",
     detail:
-      verified.length === 0
+      verified === 0
         ? "no finding was verified, so the guard was not exercised — it held vacuously"
-        : `${verified.length} verified finding(s) checked for a supported verification citing harness-captured proof`,
+        : `${verified} verified finding(s) checked for a supported verification citing harness-captured proof`,
   });
 
   checks.push({
@@ -202,28 +266,13 @@ export function gradeTrial(input: GradeInput): GradingReport {
   if (!hasCapturedProof) capabilityGaps.push("captured-execution provenance: no runtime-origin record was made in this run");
 
   // --- observed outcome, then the expectation ------------------------------
-  const observedOutcome: ObservedOutcome = verifiedWithCapturedProof
-    ? "demonstrated"
-    : verified.length > 0
-      ? "unproven_verified"
-      : crossReads.length > 0
-        ? "candidate_only"
-        : "no_finding";
+  const observedOutcome: ObservedOutcome = foldObservedOutcome(
+    { verified, hasCapturedProof, verifiedWithCapturedProof },
+    crossReads.length > 0,
+  );
 
   const expected = hidden.expectedOutcome;
-  const matches =
-    (expected === "demonstrated" && observedOutcome === "demonstrated") ||
-    (expected === "no_finding" && observedOutcome === "no_finding") ||
-    (expected === "inconclusive" && observedOutcome === "candidate_only") ||
-    (expected === "error_expected" && observedOutcome === "no_finding");
-
-  const outcome: GradingReport["outcome"] = matches
-    ? "as_expected"
-    : observedOutcome === "unproven_verified"
-      ? "unexpected"
-      : capabilityGaps.length > 0 && observedOutcome === "candidate_only"
-        ? "inconclusive"
-        : "unexpected";
+  const { matches, outcome } = classifyOutcome(expected, observedOutcome, capabilityGaps);
 
   checks.push({
     id: "case.expected_outcome",
