@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T19:21:50Z
+# Generated: 2026-10-05T19:22:35Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -60,6 +60,22 @@ new       73685492b4c8ef4b1d98650f5cc9e0df0f0d4482fa3c91f00bb286a0c06bd50b  pack
 new       8b05e216f5fea5b2c789719a458425ac5af1eba9e1c3cea72433f2a420d5c8b1  packages/cli/eval/runner.ts
 new       458f875d8eb03b7cfec643d4683fbb2a8aed82bd33f77f1ab492b0c01aeebde8  packages/cli/eval/scenario-bridge.ts
 new       c49ce1e6cdb7e01f0c1c01f1973c2cdf02727a9191f9efe00fadb59b85d92570  packages/cli/eval/scenario-runtime.ts
+new       2ec404aeb13f237b611aff397f4f72ad0aec337c9c92dc54c8d80925e19b63c1  packages/cli/eval/scenarios/W03.ts
+new       1b2f372a9ab2bf9ea42b6d0cdacb2b0dcc633afabf8693e5feef81213620b0d4  packages/cli/eval/scenarios/W04.ts
+new       407266e7e7ac4daac75fbec33328710114eff7c515dce2c80a7cb758d443f62b  packages/cli/eval/scenarios/W05.ts
+new       68f4f45154cb3756ab335a8ef856a24f29f3e5f2c362076f78f2889f0c3fba96  packages/cli/eval/scenarios/W06.ts
+new       83fb9d14b78de5359a195041af3d5ed6984d3d64a42acdc8e70fc5d3b64c23d1  packages/cli/eval/scenarios/W07.ts
+new       c1e508c445aa6f1466b65006b98d7f3dc925b0cee30640133d0e80b9c6f9f746  packages/cli/eval/scenarios/W08.ts
+new       7c7edcfb668f263f69dd06f1991f0faf651195b4e63b69a1fe4aa4dc9ff2e906  packages/cli/eval/scenarios/W09.ts
+new       e6ac325de9778f8ade484886eda9ab89e364b3d8e0767c6fe09ac5854f5c6c31  packages/cli/eval/scenarios/W10.ts
+new       22276fe4a6e63c3bb20b1f9d02036eb074d4f508c50a8470ec61f94a86193ba8  packages/cli/eval/scenarios/W11.ts
+new       ee85cb775098648f47d836e100592c82ba362f108cf799f4dbb5301ae951cba9  packages/cli/eval/scenarios/W12.ts
+new       79153f1f904b69b4df829f77760c597427fdc9cd9c5765154b1bb1e102656abe  packages/cli/eval/scenarios/W13.ts
+new       2f7f184d3ccf94c09ff222afec882801f245626251bc95ec0291565886c2cab7  packages/cli/eval/scenarios/W15.ts
+new       e30cfcd788df4543e8b12df1238705ca40ebea625966af26b42297f8041fcdb5  packages/cli/eval/scenarios/W16.ts
+new       6b5a061bb12a65d15d2bea21bac2763d792d7f26048ac8c212c529115d222218  packages/cli/eval/scenarios/index.ts
+new       52084cdddcb8b26e3a147da8ef772f04145668d911635f52eace220ac1477415  packages/cli/eval/scenarios/targets.ts
+new       d19e7bab795ceecac3e62747c0a820e4e8ebaa5c09e057530adb2b6c2aaa0b9c  packages/cli/eval/scenarios/types.ts
 new       8507101cb2d86ca048b2186b69f7fbca47c2723d07a91ec4a41a0002399bcf2c  packages/cli/test/ardent-application.test.ts
 new       b8a9c4cb2b21c9dea425b774da627d7dec74575b94825c97fad1dd0180c84303  packages/cli/test/ardent-authorization.test.ts
 new       ec10192470e5a39de2d03e2e293d97ce863704caefab116994ae33911ba6f269  packages/cli/test/ardent-banner.test.ts

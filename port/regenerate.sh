@@ -43,7 +43,13 @@ FILES=$(printf '%s\n' \
   tsconfig.json \
   src/ardent/*.ts \
   eval/*.ts \
+  eval/scenarios/*.ts \
   test/ardent-*.test.ts)
+
+# NOTE: `eval/*.ts` does not match `eval/scenarios/*.ts` — a single `*` never
+# crosses a `/`. The per-case scenario modules are a subdirectory, so they need
+# their own glob or the port silently ships a runner that imports files it never
+# copied. (Caught by the worktree apply-verify, not by tsc in this repo.)
 
 # Files this change set DELETES. A deleted tracked path is not matched by the
 # globs above (the file is gone), and `git add -N` would fail on a missing
