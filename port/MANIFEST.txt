@@ -2,7 +2,7 @@
 #
 # Mirror base commit: d8a2252f0445ad133eb3e70b71fad2dea2b0de81
 # Mirror base commit date: 2026-09-25T19:20:34Z
-# Generated: 2026-10-05T20:11:58Z
+# Generated: 2026-10-05T20:16:00Z
 #
 # 'status' is relative to the base commit above — what the monorepo has:
 #   new       the file does not exist upstream; the patch creates it
@@ -55,7 +55,7 @@ new       e8f6119a17eaa7dbe52bcec8862277e4f1ab0b7e69f6d94bfd456b1f57f913ab  pack
 new       1f101d71713da55c807765830ab4d8fc8535d74fa9f7b36eb514446b55952d5b  packages/cli/eval/fixture-app.ts
 new       ec94b63f5335b0e4a7bd52b4ac5ef126d9304371759c651118fdd8242216ac9f  packages/cli/eval/grader.ts
 new       4165306455c800f8047b871e900411380e43e33c4d610b18e112ef05f9ee28ce  packages/cli/eval/harness.ts
-new       0746a42ae13fc5943f166d88ea698e6fc7443d006db0f6f0a61e6ea29f7eba9f  packages/cli/eval/live-smoke.ts
+new       95302cfdd58b3b67550ce06ac7664c2a5b81951d59b0394857882c417ef21c7d  packages/cli/eval/live-smoke.ts
 new       73685492b4c8ef4b1d98650f5cc9e0df0f0d4482fa3c91f00bb286a0c06bd50b  packages/cli/eval/protocol.ts
 new       7b85022a6a2ab0915f6749cac0bf03e5651ae51c579a319aee04e4086c912ef8  packages/cli/eval/runner.ts
 new       458f875d8eb03b7cfec643d4683fbb2a8aed82bd33f77f1ab492b0c01aeebde8  packages/cli/eval/scenario-bridge.ts

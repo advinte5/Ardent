@@ -23,6 +23,33 @@ bun eval/live-smoke.ts --variant secured    --seed 4202
 | 4103 | vulnerable | — | 49 | 3 | find + verify | IDOR found, verification `supported` |
 | 4202 | secured | 286s | 132 | 0 | find + verify | correctly concluded **no** vulnerability |
 
+### Follow-up run: secured, confirming F2 (2026-10-05)
+
+Run `secured-4301`, model `deepseek-v4-flash`, wall 67s, 15 app requests, 0 control
+requests, 0 turn errors. It exists to answer one question under a real model: does a
+correct negative conclusion now grade as a result?
+
+It does, and the model needed no coaxing. Unprompted — from the tool description and
+one prompt guideline — it recorded
+`find-14 "Alice cannot read Bob's object: cross-account object read boundary enforced (403) on secured build"`
+with **`asserts: "absent"`**, and verified it (`ver-15`, `supported`). Graded with the
+grader's own rules over the replayed log:
+
+```
+verified findings=0  verified negatives=1  boundaryObserved=false  →  observed=no_finding
+(pre-fix rule would have said demonstrated)
+```
+
+That last line is the whole point: the same run graded `demonstrated` before the fix
+(checked in the deterministic suite, `eval/scenarios/W13.ts`).
+
+The model also ran a real control rather than asserting a negative: it read bob's
+object as **bob** (HTTP 200, marker present) *and* as **alice** (HTTP 403), so the
+refusal is proven by contrast rather than inferred from absence. The single
+marker-carrying response in the fixture log is that bob-reads-bob control —
+`crossAccountReads` excludes it by design, which is exactly the distinction W13's
+first version got wrong.
+
 **What this validates.** With a real model, the whole P0–P4.5 stack holds: the model
 started the engagement, was told the frozen scope, made target contact through
 `ardent_request`, cited **runtime-origin** observations in a finding, and the

@@ -43,6 +43,7 @@ import { loadJwt } from "../src/credentials";
 import { getCredentialsPath, getFreePiAgentDir } from "../src/paths";
 import { EvidenceStore } from "../src/ardent/evidence";
 import { readEvidenceLog } from "../src/ardent/io";
+import { crossAccountReads, foldObservedOutcome, proofVerdict } from "./grader";
 import type { FixtureVariant } from "./protocol";
 import { startFixture } from "./fixture-app";
 
@@ -213,20 +214,62 @@ async function main(): Promise<number> {
   const engagementId = created.at(-1);
 
   let evidenceRecords: unknown = null;
-  let findings: Array<{ id: string; status: string; title: string }> = [];
+  let findings: Array<{ id: string; status: string; title: string; asserts: string }> = [];
   let verifications: Array<{ id: string; outcome?: string; passed: boolean }> = [];
   let evidenceFault: string | undefined;
+  let replayed: EvidenceStore | undefined;
   if (engagementId !== undefined) {
     const read = readEvidenceLog(join(ardentDir, "engagements", engagementId, "evidence.jsonl"));
     evidenceFault = read.fault;
     evidenceRecords = read.records;
     const store = new EvidenceStore({ now: () => Date.now() });
     store.replay(read.records, read.fault);
-    findings = [...store.findings].map((f) => ({ id: f.id, status: f.status, title: f.title }));
+    replayed = store;
+    findings = [...store.findings].map((f) => ({
+      id: f.id,
+      status: f.status,
+      title: f.title,
+      asserts: f.asserts ?? "present",
+    }));
     verifications = [...store.verifications].map((v) => ({ id: v.id, outcome: v.outcome, passed: v.passed }));
   }
 
   const requests = fixture.requests();
+
+  // ---- F2: what the NEGATIVE conclusion graded as ----------------------------
+  //
+  // The question this run exists to answer. `proofVerdict` and `foldObservedOutcome`
+  // are the grader's own rules (shared, not re-implemented), and `crossAccountReads`
+  // is the grader's own definition of a boundary crossing — so this reproduces the
+  // grade over a live run's real records without a second copy of the logic.
+  //
+  // `preFixOutcome` is derived rather than re-derived: a verified absence is only
+  // promoted at all when its verification cites a harness capture, so under the
+  // old rule (which counted every `status === "verified"` record) a verified
+  // absence with no boundary crossed WAS `demonstrated`. That is F2, and it is
+  // stated here so the contrast is legible instead of asserted.
+  const boundaryObserved = crossAccountReads(truth, requests).length > 0;
+  const f2 =
+    replayed === undefined
+      ? null
+      : (() => {
+          const verdict = proofVerdict({
+            observations: replayed.observations,
+            artifacts: replayed.artifacts,
+            findings: replayed.findings,
+            verifications: replayed.verifications,
+          });
+          const observedOutcome = foldObservedOutcome(verdict, boundaryObserved);
+          return {
+            verifiedFindings: verdict.verified,
+            verifiedNegatives: verdict.verifiedAbsence,
+            capturedProofRecords: verdict.hasCapturedProof,
+            boundaryObserved,
+            observedOutcome,
+            preFixOutcome:
+              verdict.verifiedAbsence > 0 && !boundaryObserved ? "demonstrated" : observedOutcome,
+          };
+        })();
   const summary = {
     variant,
     seed,
@@ -245,6 +288,7 @@ async function main(): Promise<number> {
     evidenceFault,
     findings,
     verifications,
+    f2,
   };
   writeFileSync(join(runDir, "summary.json"), JSON.stringify(summary, null, 2));
 
@@ -255,6 +299,13 @@ async function main(): Promise<number> {
   console.error(`evidence records=${summary.evidenceRecordCount}${evidenceFault ? ` fault=${evidenceFault}` : ""}`);
   console.error(`findings=${JSON.stringify(findings)}`);
   console.error(`verifications=${JSON.stringify(verifications)}`);
+  if (f2 !== null) {
+    console.error(
+      `F2: verified findings=${f2.verifiedFindings} verified negatives=${f2.verifiedNegatives} ` +
+        `boundaryObserved=${f2.boundaryObserved} → observed=${f2.observedOutcome} ` +
+        `(pre-fix rule would have said ${f2.preFixOutcome})`,
+    );
+  }
   if (turnErrors.length > 0) console.error(`MODEL TURN ERRORS (${turnErrors.length}): ${turnErrors[0]!.slice(0, 220)}`);
   console.error(`summary: ${join(runDir, "summary.json")}`);
 
