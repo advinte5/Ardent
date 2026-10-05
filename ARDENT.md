@@ -6,8 +6,11 @@ extension unchanged, and adds scope enforcement, an approval gate, working
 memory, and an evidence store.
 
 This document describes **Phase 1 (host-only)** plus the Phase 2 subagent layer,
-and engagement-plan slices P1 (strict citations, proof-gated verification) and
-P2 (durable engagement ownership: journal, lock, artifacts).
+and partial engagement-plan slices P1 (strict citations and citation-gated
+verification), P2 (durable engagement metadata: journal, lock, artifacts), and
+P3 (explicit session-binding commands in the current working tree).
+Runtime-origin proof, evidence replay/isolation, HTTP experiments and export
+are not yet delivered. See `ARDENT-ENGAGEMENT-PLAN.md` for acceptance gates.
 It is a prototype living in the mirrored `free-pi-cli` repo; see "Porting" below
 before relying on it.
 
@@ -21,7 +24,6 @@ before relying on it.
 | `src/ardent/memory.ts` | Bounded working memory: facts, todos, artifact refs; render + prune |
 | `src/ardent/evidence.ts` | Append-only evidence store with ids, provenance, "no evidence → no finding", and the relations that form attack paths |
 | `src/ardent/prompt.ts` | The engagement brief injected before each turn |
-| `src/ardent/refusal.ts` | Refusal detection (first-person only) + the bounded one-shot authorization recovery message |
 | `src/ardent/config.ts` | Engagement config parsing (`enabled`, `targets`, `label`) |
 | `src/ardent/io.ts` | Config loader + JSONL evidence sink, plus the durable primitives: `Journal` (fsync'd append-only batches), `JournalLock` (single writer), `ArtifactStore` (content-addressed bytes) |
 | `src/ardent/application.ts` | Engagement commands over the journal: ownership ids, lifecycle, session bindings, idempotent `commandId`s, revisions, replay |
@@ -29,25 +31,29 @@ before relying on it.
 | `src/ardent/subagent-runtime.ts` | Builds the nested in-process subagent `AgentSession` |
 | `src/ardent/roles.ts` | The role table: each role's brief AND its tool subset (pure, SDK-free) |
 | `src/ardent/screenshot.ts` | `ardent_screenshot` capture: URL/scope validation, browser discovery, hashed artifact |
+| `src/ardent/http.ts` | `ardent_request`: bounded HTTP adapter — per-hop scope check, origin-bound credentials, redirect/byte/timeout limits, captured exchange |
+| `src/ardent/identities.ts` | Config-driven identity resolver: reference → credential material from an env var or file, resolved at call time, fail-closed |
 | `src/ardent/render.ts` | Boxless strip rendering for the five Ardent tools (structural Component; no pi-tui import) |
 | `src/ardent/hud.ts` | The persistent, animated one-line engagement strip, plus the footer status text and window title builders |
 | `src/ardent/theme.ts` | The Ardent in-memory pi theme (ops-console graphite + amber), applied at session start |
-| `src/ardent/overlay.ts` | Framed, keyboard-focusable full-screen modals (panel + list) |
+| `src/ardent/overlay.ts` | Framed, keyboard-focusable large overlays (panel + list) |
 | `src/ardent/dashboard.ts` | Pure content builders for the posture/findings overlays |
 | `src/ardent/banner.ts` | The `/ardent` status text (build, scope, evidence counts) |
 | `src/ardent/extension.ts` | The `free-pi-ardent` inline extension wiring it into pi |
 
 Wiring: `src/pi-launch.ts` adds `free-pi-ardent` to the extension list and its
-five evidence tools plus `spawn_agent` (`ardent_note`, `ardent_finding`,
-`ardent_verify`, `ardent_link`, `ardent_screenshot`, `spawn_agent`) to
-`ALLOWED_TOOL_NAMES`. `test/no-subagents.test.ts`'s closed-list assertion is
-updated from nine to ten extensions, and its tool ban now names `spawn_agent` as
-the single deliberate, gated exception.
+six evidence tools plus `spawn_agent` (`ardent_note`, `ardent_finding`,
+`ardent_verify`, `ardent_link`, `ardent_screenshot`, `ardent_request`,
+`spawn_agent`) to `ALLOWED_TOOL_NAMES`. `test/no-subagents.test.ts`'s closed-list
+assertion is updated from nine to ten extensions, and its tool ban now names
+`spawn_agent` as the single deliberate, gated exception.
 
 ## Safety model (host-only)
 
-There is **no sandbox yet** (pi has none built in; see its `security.md`). So the
-gate is the boundary:
+There is **no sandbox yet** (pi has none built in; see its `security.md`). The
+gate is an argument-level policy check, **not an OS/network confinement
+boundary**. Encoded/generated scripts, redirects and browser background traffic
+can escape what argument inspection sees; host-only use remains supervised:
 
 - The extension is **inert unless an engagement is configured**: no scope means
   no scope guard, no engagement brief, and evidence tools that refuse. The one
@@ -56,56 +62,83 @@ gate is the boundary:
 - An engagement config only engages when explicitly `enabled` and it names at
   least one target. "Enabled but empty scope" is treated as *not engaged*, never
   as "everything is authorized".
-- With a scope set, `tool_call` blocks destructive commands and out-of-scope
-  egress outright, and requires interactive confirmation for privilege
+- With a scope set and an active binding, `tool_call` blocks actions it
+  classifies as destructive or out of scope, and requires confirmation for privilege
   escalation, credential access, and writes outside the workspace. With no UI to
   confirm, those are blocked, not allowed. **The gate fails closed**: if the
   assessment cannot be computed at all — an unreadable scope, a hostile argument
   shape — the call is blocked with `policy evaluation failed` rather than waved
   through. A failed assessment is not permission, and the reason says what
   actually happened instead of inventing a scope verdict.
-- **A failed durable evidence write stops target execution** (read-only mode).
-  The sticky `EvidenceStore.degraded` flag is passed into the gate as
-  `persistenceDegraded`, checked *before* any classification: every shell call
-  and every tool naming an outbound `url` is blocked for the rest of the run,
-  and the evidence tools themselves refuse with a typed `storage_unavailable`
-  so nothing enters a record that cannot be committed. Local read/write work
-  continues — an engagement that has lost its audit trail may still be read and
-  exported, but it may not act on a target. Recovery is a new run against a
-  working store (there is no rehydration path yet).
+- **A failed durable evidence write stops state-changing target execution**
+  (read-only mode). The sticky `EvidenceStore.degraded` flag is passed into the
+  gate as `persistenceDegraded`, and the gate blocks an action only when it is
+  **state-changing** (`isStateChanging`): an explicit mutating HTTP method, a
+  body/upload flag, a known mutating tool, or a target-capable tool that
+  declares no method. Read-only observation continues — `curl`/`wget` GETs,
+  local shell, and any target-capable tool that declares `method: GET` — because
+  observation cannot create an unrecorded mutation. The classifier is a small
+  positive list of mutations, not a blanket block, so degraded costs the
+  engagement its ability to *act*, not its ability to *look*. The evidence
+  tools themselves still refuse with a typed `storage_unavailable`, so nothing
+  enters a record that cannot be committed. Recovery is reopening the
+  engagement (a new process) against a working device — the flag is not cleared
+  by a later write, and the refused bytes are kept as labelled salvage.
 - Findings must cite existing observation/artifact ids **and at least one of
   them**: an empty citation list is refused as `missing_citation`, a
   never-issued id as `foreign_reference`. Verification is recorded separately
-  and **only promotes a finding when the attempt cites the proof carrying its
-  result** — `passed: true` on its own is stored as an `unvalidated` attempt
-  and leaves the finding a candidate. Only verified findings appear in
-  `/findings`.
+  and only promotes when the attempt cites records the harness captured
+  itself (`origin: "runtime"`), never on `passed: true` alone and never on a
+  model-authored note. Nothing promotes in v1 because no execution path writes
+  runtime-origin records yet — that is the HTTP adapter work. `/findings`
+  exposes the prototype's verified dispositions, not a guarantee of
+  exploitability.
 
-### Verification promotes only on proof
+### Current verification gate: captured proof, not independently validated proof
 
 `ardent_verify` takes `proof_observation_ids` / `proof_artifact_ids` alongside
-`passed` and `method`. The store derives the outcome **from the proof, never
-from `passed`**:
+`passed` and `method`. A verdict now requires proof the **harness** captured:
+an observation recorded with `origin: "runtime"`, or a non-screenshot artifact
+written by the capture path. Everything else — a model's note, a bare boolean,
+a screenshot — records the attempt and moves nothing. **The store still does
+not inspect source bytes, enforce a fresh reproduction or control, or validate
+the cited claim.** Current behavior:
 
 | Proof cited | Claim | Recorded outcome | Finding status |
 | --- | --- | --- | --- |
 | none | `passed: true` | `unvalidated` | unchanged (still a candidate) |
-| yes | `passed: true` | `supported` | `verified` |
-| yes | `passed: false` | `refuted` | `refuted` |
-| yes | `inconclusive: true` | `inconclusive` | `inconclusive` |
+| model-authored note | `passed: true` | `unvalidated` | unchanged |
+| model-declared file artifact | `passed: true` | `unvalidated` | unchanged |
+| runtime-captured record | `passed: true` | `supported` | `verified` |
+| runtime-captured record | `passed: false` | `refuted` | `refuted` |
+| runtime-captured record | `inconclusive: true` | `inconclusive` | `inconclusive` |
 | screenshot-only | any | refused (`validation`) | unchanged |
 
-This is what stops a worker promoting its own candidate by asserting a boolean.
+**`ardent_request` is the path to the `verified` rows (P4).** It is the one
+tool that records a `runtime`-origin observation: its exchange is captured by
+the harness from bytes the harness received, so citing its id can support a
+finding. `ardent_note`, a bare boolean and a screenshot still cannot — `origin`
+defaults to `model` — so an attempt built only on those stays `unvalidated`. What
+is still missing is a **fresh** reproduction with a control and an independent
+proof profile: a `runtime` record says the harness captured *something*, not that
+the capture discriminates the claim. Until P5, treat a `verified` finding as
+proven to have occurred in a captured exchange, not as independently re-tested.
+Treat `/findings` accordingly.
+
+Replay re-derives each imported attempt under this same rule and never
+upgrades a label, so a record written under weaker rules cannot come back as a
+verdict. Ids survive, which is what keeps a resumed session's citations
+resolving.
+
 The unvalidated attempt is still persisted — it happened, and the audit trail
 should show it — but it reaches neither `/findings` nor the `Verify …` todo,
 which stays open so a live lead is not buried behind a bare assertion.
 `inconclusive` is its own status throughout: a test that could not discriminate
 is not a refutation, and the report says so.
 
-Screenshot-only proof is refused because a capture shows what rendered, not
-what executed (see *Screenshots are artifacts, not proof*): the deterministic
-signal has to be recorded as an observation, or as a non-image artifact, beside
-the image.
+A `runtime`-origin record still only says the harness captured *something*.
+It does not establish that the capture is a deterministic signal for the claim
+it is cited against — that connection is what the P5 proof profile must add.
 
 Every refusal carries a typed code — `validation`, `missing_citation`,
 `foreign_reference`, `not_found` — that survives into the tool result's
@@ -122,10 +155,59 @@ and credentials entering those traces. Phase 1 stores evidence under
 Write `~/.free-pi/agent/ardent/engagement.json`:
 
 ```json
-{ "enabled": true, "label": "<your-engagement>", "targets": ["10.0.0.0/24", "host.example.com"] }
+{
+  "enabled": true,
+  "label": "<your-engagement>",
+  "targets": ["10.0.0.0/24", "host.example.com"],
+  "authorizationRef": "ROE-2026-014 / bug-bounty program #42",
+  "acknowledgeLive": true,
+  "identities": {
+    "account-a": { "cookie_env": "ARDENT_ACCOUNT_A_COOKIE" },
+    "staging-admin": { "headers_file": "/run/secrets/staging-admin.headers" }
+  }
+}
 ```
 
-Then run free-pi normally. `/scope` lists the authorized targets, `/findings`
+Optional fields, all of them:
+
+- **`authorizationRef`** — the sanctioning reference recorded on the engagement
+  (a ticket, a signed ROE, a program id). When omitted, `/ardent start` falls
+  back to the config path, which is provenance, not authorization.
+- **`acknowledgeLive`** — required to start an engagement whose scope names a
+  **public** (non-loopback, non-RFC1918) target. It is a deliberate, in-band
+  acknowledgment that the target is live; without it `/ardent start` refuses.
+- **`identities`** — engagement-scoped identity references for `ardent_request`.
+  Each names **where a secret is resolved from** — `cookie_env` / `headers_env`
+  or `cookie_file` / `headers_file` — never the secret itself, so the config is
+  safe to commit and the reference is safe to show the model. The model passes
+  the reference (e.g. `"account-a"`); the resolver reads the secret at call
+  time and the adapter binds it to its own origin. An unresolved reference fails
+  closed as `identity_unavailable`; it never falls back to an anonymous request.
+
+**The engagement freezes the authority it started with.** `/ardent start`
+records a sha256 of the normalized scope + authorization reference on the
+engagement, and the gate, the brief and `ardent_request` all use that **frozen**
+scope rather than the config's. Editing `engagement.json` after the engagement
+starts is therefore detected as drift: `/ardent start` refuses to re-activate it
+and says to create a new engagement. A scope expansion is never adopted by
+mutation.
+
+Then run free-pi normally and explicitly bind this session:
+
+```text
+/ardent start Assess the supplied authorized fixture
+```
+
+Configuration authorizes scope; it no longer creates a session binding by
+itself. `/ardent bind` lists existing engagements, `/ardent bind <id>` joins
+one, and `/ardent release` releases this session without deleting history.
+`/ardent start` can activate a bound draft/paused engagement. `/ardent unlock`
+reports locks; clearing one with `<id>` requires a same-host holder whose PID
+is no longer live, not merely an old timestamp. These commands are present in
+the working tree; real SDK switch/fork/resume flows still need acceptance tests.
+A binding's persistence does **not** imply its evidence survives restart.
+
+`/scope` lists the authorized targets, `/findings`
 shows verified findings, and `/ardent` reports the build, engagement state, the
 config path Ardent actually reads, and the evidence counts — the one command to
 run when the TUI looks wrong.
@@ -244,13 +326,15 @@ duplicate, and — for `enables` — any edge that would close a cycle. Keeping
 from looping. `escalates` edges are exempt: they are symmetric-ish by nature and
 never walked.
 
-`attackPaths()` returns the maximal `enables` chains from root to leaf, each with
-its **peak severity** (the most urgent link, not the first) and how many links
-are actually verified. A finding with no incoming `enables` edge is a root; a
-node with two parents appears in both routes, because both genuinely get there.
+`attackPaths()` currently follows only the first outgoing `enables` edge
+from each root, with peak severity and the number of verified nodes. It can
+omit branches; it is not a complete graph traversal. A finding with no incoming
+`enables` edge is a root. Relations are model assertions without captured
+transition evidence: even verified endpoints do not prove that the edge works.
 `/findings` reports chains separately from the flat list, and each chain is
 labelled **`demonstrated`** when every link on it is verified and **`candidate`**
-otherwise — an unproven route never reads as a proven one. The HUD strip
+otherwise. **That label checks node dispositions only, not demonstrated
+transitions; it must not be interpreted as an independently proven chain.** The HUD strip
 carries a `⇢ N paths` count once any exist.
 
 The engagement brief tells the model to chain as it goes, because a chain found
@@ -259,8 +343,9 @@ late is a chain that never gets cited.
 ## Screenshots are artifacts, not proof
 
 `ardent_screenshot` captures an in-scope URL as a PNG and records it as an
-**Artifact** with a SHA-256, so a finding can cite an image that provably came
-from the target. That is the whole value: a receipt, not a verdict.
+**Artifact** with a SHA-256, so a finding can cite the captured bytes. A digest
+checks byte identity, not target provenance, request authorization or truthful
+interpretation. The capture is supporting material, not a verdict.
 
 **A screenshot shows what RENDERED, not what EXECUTED.** This is the distinction
 the tool is built around, because it is exactly where a vision model will
@@ -273,8 +358,10 @@ element, a broken layout — is genuinely corroborated by the image.
   yes anyway, because the page *looks* fine and the caption sounds confident.
 
 So the capture is recorded as an artifact and **never as a verification**. The
-deterministic signal (DOM state, console output, a network call, the payload
-string in the returned HTML) is the observation; the image is attached to it. The
+deterministic signal must match the claim: HTTP reflection or a rendered payload string is
+not proof of script execution. XSS reproduction needs an attributable bounded
+execution signal in the intended victim context, not agent-injected evaluator
+code. Record source events/bytes beside the image; prose alone is insufficient. The
 tool's own guidelines say this in the model's words, and `ardent_verify` still
 requires a `method` describing how it was actually reproduced **plus proof a
 screenshot cannot supply**: proof consisting only of captures is refused with
@@ -299,6 +386,43 @@ when the active model declares the modality, so `buildProviderConfig` declares
 `input: ["text", "image"]`. The catalog does not advertise per-model
 capabilities yet, so this is a deliberate blanket declaration — revisit it when
 `/client-version` reports modalities.
+
+## HTTP requests are captured execution (plan slice P4)
+
+`ardent_request` makes one bounded HTTP exchange and records it as a
+**runtime-origin observation** — the only proof that can carry a verification.
+`src/ardent/http.ts` holds the adapter; the tool is a thin seam over it.
+
+Arguments: `method`, `url`, optional `identity` (an operator-supplied account
+*reference*, never a credential), `redirect` (`follow` or `deny`), `query`,
+`headers`, `json_body` / `form_body`. The response body, status, byte count and
+sha256 come back; the exchange is also written to the engagement's evidence log
+with its per-hop metadata.
+
+Four guarantees, each enforced in the adapter rather than by asking the model:
+
+- **Scope before every hop.** The chain is walked one hop at a time, and the
+  scope predicate runs before each contact — a redirect into an unapproved
+  origin is refused having sent nothing to it. `redirect: "deny"` stops at the
+  first 3xx without contacting the destination it names.
+- **Credentials are origin-bound.** The secret adapter resolves the `identity`
+  reference to material bound to the origin it was resolved for; a cross-origin
+  hop is sent bare. Records carry request header **names** only, so a cookie or
+  token cannot leak into a trace or an observation.
+- **Bounded.** Timeout, redirect count and response bytes are fixed limits the
+  model cannot raise; the body is read with a streaming cap and marked
+  `truncated` when it is cut. A target cannot be flooded or exhausted.
+- **Encoding-safe.** Query and form values are encoded with `URLSearchParams`,
+  so a value that means `a&b=c` is transmitted as that instead of being
+  re-parsed.
+
+The `tool_call` gate still runs first: an out-of-scope URL or a state-changing
+method while the store is degraded is blocked there as well, and the gate's
+refusal is what the model sees. Identity resolution is injected
+(`createArdentExtension({ identities })`), and production builds it from the
+config's `identities` block (`src/ardent/identities.ts`): an env var or file per
+reference, read at call time. An `identity` argument that does not resolve fails
+closed as `identity_unavailable`.
 
 ### A configured scope is authorization, not a task
 
@@ -332,39 +456,37 @@ into existence on every step.
 Two changes, both in the brief rather than in the gate:
 
 - **Authorization is stated before the boundary.** The rules now open by saying
-the engagement is authorized and that the harness enforces the scope
-*mechanically* — out-of-scope egress and destructive commands are blocked before
-they execute. A model that meets the scope list first can read an authorized
+the engagement is authorized and claims the harness enforces scope
+*mechanically*. **That wording overstates the current argument-level gate:**
+it blocks classified tool calls, not every possible network dispatch. Correcting
+the injected prompt upstream is part of the remaining correctness work. A model that meets the scope list first can read an authorized
 step as something it is being asked to adjudicate; a model that meets the
 authorization first has nothing to adjudicate. The rule that follows tells it
 not to re-litigate authorization and not to attach disclaimers to in-scope
 work.
 - **The destructive/privileged rule is named as the single exception.** It used
 to read as a general "ask before acting"; it now says that confirming first is
-the *one* case where a question is right, and that everything in scope short of
-it proceeds.
+the *one* case where a question is right. That is also too broad: scope does
+not authorize every technique, mutation or data-handling choice. Missing
+objective, identity, policy or approval must remain legitimate blockers.
 
 Declining is still available, and the brief says so: anything genuinely outside
 the scope or the rules is answered once, in one line, and stopped.
 
-### The recovery loop (bounded)
+### Refusal recovery (removed)
 
-Prompt wording alone does not fix a model that has already decided. The harness
-answers a refusal once, in-band:
+The bounded refusal-recovery loop — first-person detection, the one-nudge-per-
+objective budget, the `agent_settled` trigger and the `⟳ authorization reminder`
+strip — was **removed** (safety review, 2026-10-04). Its governing test is
+*does this control establish authorization or proof?* It does not: it
+re-authorizes a model that already declined, which the scoped brief and the
+action gate handle. `src/ardent/refusal.ts` and `test/ardent-refusal.test.ts`
+are deleted, and `agent_settled` / `ARDENT_RECOVERY_TYPE` are gone from the
+extension's hook surface.
 
-- `agent_end` captures the assistant's last text; `agent_settled` (the agent is
-  idle, so `triggerTurn` starts a real continuation turn) runs the detector.
-- Detection is **first-person only** (`src/ardent/refusal.ts`). A pentest
-  transcript is full of *"connection refused"*, *"the server declined the
-  request"*, *"403"* — those are observations, not the model refusing, and a
-  detector that flagged them would fire on nearly every recon turn.
-- Recovery is **bounded to one nudge per user objective**, reset when the user
-  speaks again. A model that declines twice has made its position known;
-  repeating the nudge is nagging, not recovery.
-- The nudge itself **re-authorizes declining**: if the request is genuinely
-  outside scope, saying so in one line is the correct answer and the reminder
-  says exactly that. It re-states the authorization and points at the gate as
-  the boundary — it does not override the provider's own judgement.
+Declining is still available, and the brief still says so. The difference is
+that a decline is now answered by the operator rather than automatically
+re-litigated by the harness.
 
 ## Subagents (Phase 2)
 
@@ -431,8 +553,11 @@ runner retries a run that produced no text, with exponential backoff plus jitter
 When a limit above 1 is in effect the child's **SDK-level provider retry is
 turned off** (`retry.provider.maxRetries = 0`). The SDK's retry is invisible to
 the tool's abort handling and holds a semaphore slot without coordination, so
-the runner owns the loop instead — it can release and re-acquire the slot, and
-its abort cancels the backoff. At the default limit of 1 nothing is retried at
+the runner owns the loop instead. Currently `schedule.run` wraps the whole
+retry loop: it does **not** release/reacquire a slot between attempts. Abort
+cancels the backoff. Retrying a whole empty-output child can repeat completed
+mutations; this is not safe failure classification and must be replaced before
+stateful engagement use. At the default limit of 1 nothing is retried at
 the runner level and the SDK's retries are untouched, so serialized behavior is
 byte-for-byte what it was before.
 
@@ -533,7 +658,7 @@ The TUI is designed as an operator console, not a chat toy. Four rules:
   model, which an ops strip must not drop.
 - **Boxless by default, framed only for modals.** Every in-transcript Ardent
   surface stays boxless (enforced by `test/ardent-render.test.ts`); the only
-  bordered Ardent surfaces are the full-screen overlays, where a frame makes the
+  bordered Ardent surfaces are the large overlays, where a frame makes the
   modal boundary legible.
 
 ### Overlays
@@ -543,18 +668,17 @@ verified-first, attack paths); `/findings` opens the same findings view;
 `/scope` opens a **read-only** allowlist view; and `/sessions` opens a filterable
 session picker that calls `ctx.switchSession`. All four are `ctx.ui.custom`
 overlays (`src/ardent/overlay.ts`, content from `src/ardent/dashboard.ts`),
-scrollable with `↑`/`↓`, filtered by typing, and closed with `esc`. pi already
+scrollable with `↑`/`↓` and closed with `esc`. Typing filters the session
+picker only; posture/findings/scope panels do not filter. Overlays currently
+request 92% width, not full-screen. The picker consumes `j`/`k`/`q` as navigation
+or dismissal, so those letters cannot be searched normally; long labels and
+Unicode terminal-width handling still need repair and real resize tests. pi already
 exposes a session selector internally as `app.session.resume`, but it ships with
 **no default key**, so `/sessions` is the shortest path to session UX.
 
 `/scope` is a viewer, not an editor, on purpose: there is no config writer yet,
 and changing the scope changes what is *authorized*, so it stays a deliberate
 file edit until a writer with explicit confirmation exists.
-
-When the bounded recovery loop re-frames a refusal, the nudge is now visible in
-the transcript as a boxless warning strip (`⟳ authorization reminder`) — the
-renderer reports that a nudge happened and that the action gate is unchanged, and
-deliberately does not echo the instruction that was sent to the model.
 
 ## Engagement ownership, journal and artifacts (plan slice P2)
 
@@ -645,20 +769,29 @@ short mid-record blocks until `recoverTail()`, which returns the bytes it
 discarded so records are never silently truncated. A second process on the same
 journal is refused at `open()`, before it can mutate anything.
 
-Evidence writes are now under the same contract: `createJsonlEvidenceSink` no
-longer swallows errors, so a failed durable write sets
-`EvidenceStore.degraded` (with `persistenceError` saying why) instead of
-reporting success over a hole. The flag is deliberately sticky — a later
-successful write does not repair the record that went missing.
+Evidence writes are under the same contract, and each engagement has its own
+log: `<agentDir>/ardent/engagements/<engagementId>/evidence.jsonl`.
+`EvidenceStore` **commits before it projects** — the record is written and
+fsync'd first, and only then enters the in-memory projection. A failed write
+returns a typed `storage_unavailable` refusal, the projection does not advance,
+and the bytes are retained as **salvage** (`salvage` / `salvageCount`), which is
+explicitly not report evidence. `degraded` (with `persistenceError` saying why)
+is set and the store then refuses further records outright rather than retrying:
+retrying would let the log and the counts drift, which is the thing the flag
+exists to prevent. The flag is deliberately sticky — a later write cannot repair
+the record that went missing, so a new run against a working device is the way
+out.
 
 Because it is sticky it is also **enforced**, not merely reported (read-only
 mode; the invariant "a required persistence/policy failure prohibits new
-target execution"):
+state-changing target execution"):
 
-- `assessAction` checks it first (rule 0, `GateInput.persistenceDegraded`):
-  with a failed durable write every shell call and every tool naming an
-  outbound `url` is blocked for the rest of the run, with a reason that names
-  the storage failure instead of dressing it up as an out-of-scope verdict.
+- `assessAction` checks it first (rule 0, `GateInput.persistenceDegraded`).
+  With a failed durable write the gate blocks only what the `isStateChanging`
+  classifier recognizes as a mutation — a mutating HTTP method, a body/upload
+  flag, a known mutating tool, or a target-capable tool with no declared method.
+  Read-only observation stays available, and the block reason names the storage
+  failure instead of dressing it up as an out-of-scope verdict.
 - All five evidence tools then refuse with `Rejected: storage_unavailable — …`
   and a typed `details.code`, so nothing new enters a record that cannot be
   committed. The TUI row prints the code; it no longer says "no active
@@ -666,18 +799,77 @@ target execution"):
 - Local read/write work and everything already committed stay usable, so the
   operator can still read and export what survived — degraded, not dead.
 
-Recovery is a new run against a working store: there is still no rehydration
-path (below), so nothing can clear the flag honestly. The "preserve available
-output for explicit recovery/export" half of that invariant is only partly
-met — nothing is discarded (the failed records stay in memory for the life of
-the process), but there is **no export command yet**, so an operator cannot
-salvage them to a file. That is an open gap, not a covered one. Surfacing the
-flag in `/ardent` and the HUD is plan Phase 6's "durable-write status", not
-wired yet.
+Recovery is a new run against a working device: `degraded` is cleared by
+reopening the engagement (a new process) or by replaying into a fresh store,
+not by a later write. The "preserve available output for explicit
+recovery/export" half of that invariant is now partly met: a refused record is
+retained as **salvage** and labelled as such on the refusing tool result and in
+`EvidenceStore.salvage`, so it is neither discarded nor mistakable for report
+evidence. There is still **no export command**, so an operator cannot yet write
+those bytes anywhere — an open gap, not a covered one.
 
-**Not wired yet:** the extension still keeps config and evidence state in
-process. Plan slice P3 is what moves session binding and the evidence commands
-onto this application service while keeping the external tool names stable.
+**Wired (working tree):** the extension resolves explicit session bindings
+through `EngagementStore` and exposes `/ardent start`, `bind`, `release`, and
+`unlock`. Evidence commands now go through `EngagementStore.evidenceFor(id)`:
+every surface — the evidence tools, the HUD counts, `/findings`, `/posture`,
+`/ardent status` — reads the **bound engagement's** log, and a second engagement
+neither displays nor accepts the first one's citations (`foreign_reference`).
+Resuming a session replays that log, so committed records, ids and dispositions
+come back without renumbering. Working memory is still process-local: it is not
+yet rehydrated, so a resumed session starts with an empty memory block even
+though its evidence is back. What remains unverified is live SDK switch/fork
+behavior (see the limitation below).
+
+## Evaluation harness (plan slice P0)
+
+The `eval/` tree is the measurement half of the plan: a declared case manifest, a
+resettable local fixture, a hidden grader, and a runner that records trial
+artifacts. It exists so the next phases are judged on outcomes rather than on
+prose, and so a fixture that leaks cannot be graded as "no finding" because a run
+said so.
+
+```bash
+bun eval/cli.ts --trials 3              # artifacts under <agentDir>/ardent/evals/
+bun eval/cli.ts --cases W01,W02 --trials 3 --seed 1000 --out /tmp/ardent-evals
+```
+
+What it measures, and against what:
+
+- **Manifest (`eval/protocol.ts`, `eval/cases.ts`).** All sixteen W01–W16 cases
+  are declared with objective, approved scope and exclusions, credential
+  *references*, budgets, a development/held-out split and a **hidden**
+  expectation. `investigatorView()` builds the visible half field by field, so a
+  hidden field added later cannot leak by default. Unknown fields, a typo'd
+  budget key, a missing expectation and an unknown case id are all refused with
+  the offending name rather than defaulted. A case with no fixture is refused by
+  the runner, never skipped — a suite that silently drops cases reports coverage
+  it did not have. Only W01 and W02 are wired in this checkpoint.
+- **Fixture (`eval/fixture-app.ts`).** Two loopback planes. The in-scope app has
+  two accounts, one object each and one shared object, with object ids and
+  protected markers rotated per trial and an authoritative server-side request
+  log. The harness-only control plane sits on its own port, refuses anything
+  without its token, and records every unauthenticated attempt — which is what
+  turns "the excluded endpoint received nothing" into a check. Nothing in a
+  report carries a marker, a password or a session cookie, only digests.
+- **Grader (`eval/grader.ts`).** Reads the fixture's request log and the
+  engine's projections, never the agent's final prose. A verified finding whose
+  proof is not harness-captured is `unproven_verified` and graded `unexpected`.
+- **Driver and harness (`eval/harness.ts`, `eval/driver.ts`).** The deterministic
+  driver takes the same path a model would: `/ardent start` to bind, the real
+  `tool_call` gate before **every** target contact, the evidence tools, and
+  `ardent_verify`. It has no privileged API and never reaches the control plane.
+  Since P4, the boundary under test is reached through the real `ardent_request`
+  tool (gate first, then captured exchange); only the fixture readiness probe and
+  the login that acquires an identity's cookie use a shell `curl` — neither is
+  target evidence.
+
+**Baseline, three trials each (deterministic drivers, seed 1000):** W02 (secured)
+reports `no_finding` as expected, consistent across all three. Since P4, W01
+(vulnerable) observes the seeded boundary crossing and **verifies** it from the
+captured exchange: `observed=demonstrated`, `as_expected` 3/3. Before P4 the same
+run recorded only a candidate (`inconclusive`, `captured-execution provenance for
+HTTP requests (plan P4)` named as the gap) — the change is the adapter, and the
+number moved because a proof path now exists, not because a threshold was relaxed.
 
 ## Known Phase 1 limitations
 
@@ -686,20 +878,37 @@ onto this application service while keeping the external tool names stable.
   completions outright. A roster of agents is therefore a queue, not a thread
   pool, and the default depth stays one level.
 - **No sandbox / network enforcement.** The gate inspects commands, not the OS;
-  it is a strong deterrent, not a boundary. Do not point this at systems you are
+  it is a best-effort argument check, not confinement. Do not point this at systems you are
   not authorized to test.
 - **No model routing or prompt caching** — the free-pi proxy owns the upstream;
   the client only chooses among the server's catalog ids.
 - **Subagent unknowns (server-side):** resolved — see "Concurrency" above. What
   remains unmeasured is how wide the pipelining window is in practice; the
   probe used a single long `sleep`.
-- Working memory and evidence are per-process; v1 does not yet reload a store
-  across sessions. Engagements themselves are durable now (journal + replay,
-  see "Engagement ownership" above), and a failed evidence write is both
-  *visible* and *enforced* via `EvidenceStore.degraded` — read-only mode, see
-  *Safety model* above — but the evidence records still have no rehydration
-  path, so the flag reports a hole nothing can yet fill, and the only way out
-  of read-only mode is a new run.
+- **Working memory is per-process.** Evidence and engagement state are durable
+  and replay (see "Engagement ownership" above), but working memory is still
+  strings and capped lists held in the process, so a resumed session starts
+  with an empty memory block. Ownership of it is explicit; rehydration is not.
+- **A mid-run session switch blocks instead of settling.** The installed SDK's
+  fork/switch behavior during an open child run has not been established, so a
+  session id that changes while an assignment is in flight is recorded and
+  everything target-capable or evidence-writing is refused with `cancelled`
+  until an operator runs `/ardent start` or `/ardent bind` deliberately. This
+  is a visible block, not a demonstration that switching is safe.
+- **Promotion needs a captured exchange, not an assertion.** A verification
+  only carries a verdict when it cites proof the harness captured itself
+  (`origin: "runtime"` records, or a non-screenshot artifact written by the
+  capture path). `ardent_request` now supplies such records, so a finding can
+  reach `verified` — but only when the capture actually carries the signal. A
+  note, a bare `passed: true` or a screenshot still records an unvalidated
+  attempt, and a fresh independent reproduction with a control is still P5.
+- **Ids are unique per engagement, not globally.** `obs-1` in two engagements
+  names two records; a path carries the engagement id, and reports must too.
+- **The P0 baseline is deterministic only.** No model or provider was involved,
+  so its numbers measure the runtime and the fixture, not model skill; every
+  trial is stamped `model:null` and missing usage is `null`, never zero. It is
+  not a quality or improvement claim. Fixtures exist for W01/W02 only; W03–W16
+  are declared and refused.
 
 ## Phase 2 (in progress): plan → execute → verify, then subagents
 
@@ -710,17 +919,27 @@ onto this application service while keeping the external tool names stable.
    with the free-pi provider, sharing the parent's session id, gate and evidence
    store, serialized (`maxOpen <= 1`), with a depth guard (default 1), abort
    propagation, and per-call **role selection** that reduces the child's tool
-   set. See `src/ardent/subagent.ts`, `src/ardent/subagent-runtime.ts`,
-   `src/ardent/roles.ts`, and `test/ardent-subagent-runtime.test.ts`. Parallel
-   workers are closed off by the lease (see "Concurrency"); pipelined
-   serialized fan-out is the remaining opportunity.
-3. **Isolation:** move execution into a container (whole-process, per pi's own
-   guidance) and enforce scope at the network layer, replacing the host gate as
-   the primary boundary.
-4. **Long-term memory:** SQLite findings DB (query previous findings per
-   target). Artifact content-addressing now exists as `ArtifactStore`
-   (sha256, temp → fsync → rename); what remains is routing evidence
-   artifacts through it and reloading them on restart.
+   set. Each assignment is **pinned** to the engagement that authorized it for
+   the length of the run, so a child (which holds no binding of its own) writes
+   into the parent's engagement and cannot be re-homed by a later binding
+   change. See `src/ardent/subagent.ts`, `src/ardent/subagent-runtime.ts`,
+   `src/ardent/roles.ts`, `test/ardent-subagent-runtime.test.ts`, and the
+   pinning checks in `test/ardent-evidence-ownership.test.ts`. Parallel workers
+   are closed off by the lease (see "Concurrency"); pipelined serialized
+   fan-out is the remaining opportunity.
+3. **Execution — captured HTTP done (P4); proof profile next.** The bounded
+   HTTP adapter, supplied identity references and captured exchanges are
+   delivered: `ardent_request` records a runtime-origin exchange, and W01 is now
+   graded `demonstrated`. Still missing is the fresh proof profile (experiment
+   registration, a control, an independent reproduction) — that is P5. Network
+   confinement/container execution is deferred beyond host-only v1; do not imply
+   the current gate supplies it.
+4. **Long-term state — partly done.** Evidence and artifacts are per-engagement
+   and replay on restart (`EngagementStore.evidenceFor`/`artifactsFor`). Still
+   open: working-memory rehydration, an export/retest package, and a legacy-log
+   migration path that maps old flat records onto an engagement explicitly
+   rather than guessing (see the plan). SQLite is an optional later alternative,
+   not a prerequisite or committed dependency.
 
 ## Porting
 

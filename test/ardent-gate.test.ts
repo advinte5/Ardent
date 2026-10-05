@@ -101,22 +101,22 @@ describe("assessAction — persistence failure (read-only mode)", () => {
   const degraded = (toolName: string, input: Record<string, unknown>) =>
     assessAction({ toolName, input, scope, cwd, persistenceDegraded: true });
 
-  test("blocks shell execution while audit writes are failing, and names the targets", () => {
-    const a = degraded("bash", { command: "nmap 10.0.0.5" });
+  test("blocks a state-changing target action while audit writes are failing, and names the targets", () => {
+    const a = degraded("bash", { command: "curl -X POST http://10.0.0.5/api/transfer" });
     expect(a.action).toBe("block");
     expect(a.reason).toContain("persistence failure");
-    expect(a.reason).toContain("audit writes");
+    expect(a.reason).toContain("state-changing");
     expect(a.targets).toEqual(["10.0.0.5"]);
   });
 
-  test("blocks even a local-looking shell: a shell is the execution vehicle", () => {
-    const a = degraded("bash", { command: "ls -la /tmp" });
-    expect(a.action).toBe("block");
-    expect(a.reason).toContain("persistence failure");
-    expect(a.targets).toEqual([]);
+  test("allows read-only observation — it cannot create an unrecorded mutation", () => {
+    expect(degraded("bash", { command: "curl http://10.0.0.5/status" }).action).toBe("allow");
+    expect(degraded("bash", { command: "ls -la /tmp" }).action).toBe("allow");
+    // A body/upload flag is a mutation even without an explicit method.
+    expect(degraded("bash", { command: "curl -d 'amount=1' http://10.0.0.5/api" }).action).toBe("block");
   });
 
-  test("blocks a tool that names an outbound url", () => {
+  test("blocks a target-capable tool that declares no method (mutation by omission)", () => {
     const a = degraded("ardent_screenshot", { url: "http://10.0.0.5/login" });
     expect(a.action).toBe("block");
     expect(a.targets).toEqual(["10.0.0.5"]);

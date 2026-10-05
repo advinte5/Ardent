@@ -1,6 +1,9 @@
 // Tests for the persistent Ardent HUD: the single-line strip builder, the
 // animated component, and the extension wiring that mounts/clears/restacks it.
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseArdentConfig } from "../src/ardent/config";
 import { createArdentExtension } from "../src/ardent/extension";
@@ -36,6 +39,11 @@ const baseModel: ArdentHudModel = {
   verified: 1,
   chains: 0,
 };
+
+/** A fresh engagement repository — a test must never touch the real one. */
+function freshEngagementsDir(): string {
+  return mkdtempSync(join(tmpdir(), "ardent-engagements-"));
+}
 
 describe("hudLines", () => {
   test("renders an indented, boxless identity strip plus a posture detail line", () => {
@@ -211,6 +219,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 
 function createFakePi() {
   const handlers = new Map<string, Handler[]>();
+  const commands: Array<{ name: string; options?: unknown }> = [];
   const pi = {
     on(event: string, handler: Handler) {
       const list = handlers.get(event) ?? [];
@@ -219,10 +228,12 @@ function createFakePi() {
     },
     registerTool() {},
     registerMessageRenderer() {},
-    registerCommand() {},
+    registerCommand(name: string, options?: unknown) {
+      commands.push({ name, options });
+    },
     appendEntry() {},
   } as unknown as ExtensionAPI;
-  return { pi, handlers };
+  return { pi, handlers, commands };
 }
 
 function makeUiCtx() {
@@ -232,6 +243,9 @@ function makeUiCtx() {
     hasUI: true,
     mode: "tui",
     cwd: "/tmp",
+    // Bindings are per session id, and pi hands it over through the session
+    // manager — without it nothing can be bound, so no test can be engaged.
+    sessionManager: { getSessionId: () => "hud-session" },
     ui: {
       setWidget: (key: string, content: unknown, options?: { placement?: string }) =>
         widgets.push({ key, content, placement: options?.placement }),
@@ -246,6 +260,21 @@ function makeUiCtx() {
 
 function factoryOf(ext: unknown): (pi: ExtensionAPI) => void {
   return (ext as { factory: (pi: ExtensionAPI) => void }).factory;
+}
+
+/**
+ * Bind the session to an engagement. The config supplies the scope; binding is
+ * an explicit `/ardent start`, so a HUD test meaning "engaged" has to say so
+ * the same way an operator would — and the strip repaints from that command.
+ */
+async function startEngagement(
+  fake: { commands: Array<{ name: string; options?: unknown }> },
+  ctx: ExtensionContext,
+): Promise<void> {
+  const ardent = fake.commands.find((c) => c.name === "ardent")?.options as {
+    handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
+  };
+  await ardent.handler("start", ctx);
 }
 
 const engaged = parseArdentConfig({ enabled: true, label: "acme", targets: ["10.0.0.5"] })!;
@@ -270,9 +299,10 @@ function buildComponent(content: unknown): { render(w: number): string[]; dispos
 describe("extension HUD wiring", () => {
   test("mounts above the editor when engaged, and clears when not", async () => {
     const mounting = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged }))(mounting.pi);
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged }))(mounting.pi);
     const { ctx, widgets } = makeUiCtx();
     await mounting.handlers.get("session_start")![0]!({}, ctx);
+    await startEngagement(mounting, ctx);
 
     const hud = lastWidgetFor(widgets, ARDENT_HUD_WIDGET_KEY);
     expect(hud).toMatchObject({ key: ARDENT_HUD_WIDGET_KEY, placement: "aboveEditor" });
@@ -284,18 +314,19 @@ describe("extension HUD wiring", () => {
     component.dispose?.();
 
     const idle = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => undefined }))(idle.pi);
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => undefined }))(idle.pi);
     const idleCtx = makeUiCtx();
     await idle.handlers.get("session_start")![0]!({}, idleCtx.ctx);
     expect(lastWidgetFor(idleCtx.widgets, ARDENT_HUD_WIDGET_KEY)).toMatchObject({ content: undefined });
   });
 
   test("re-asserts the HUD on turn_end and clears it on shutdown", async () => {
-    const { pi, handlers } = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged }))(pi);
+    const { pi, handlers, commands } = createFakePi();
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged }))(pi);
     const { ctx, widgets } = makeUiCtx();
 
     await handlers.get("session_start")![0]!({}, ctx);
+    await startEngagement({ commands }, ctx);
     const atStart = widgets.filter((w) => w.key === ARDENT_HUD_WIDGET_KEY).length;
     await handlers.get("turn_end")![0]!({}, ctx);
     expect(widgets.filter((w) => w.key === ARDENT_HUD_WIDGET_KEY).length).toBe(atStart + 1);
@@ -309,7 +340,7 @@ describe("extension HUD wiring", () => {
     // Not engaged: a visible "ardent idle" line, so an inactive Ardent is never
     // mistaken for an absent one.
     const idle = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => undefined }))(idle.pi);
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => undefined }))(idle.pi);
     const idleCtx = makeUiCtx();
     await idle.handlers.get("session_start")![0]!({}, idleCtx.ctx);
 
@@ -326,14 +357,15 @@ describe("extension HUD wiring", () => {
 
     // Engaged: the idle strip is explicitly cleared, not merely left behind.
     const active = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged }))(active.pi);
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged }))(active.pi);
     const activeCtx = makeUiCtx();
     await active.handlers.get("session_start")![0]!({}, activeCtx.ctx);
+    await startEngagement(active, activeCtx.ctx);
     expect(lastWidgetFor(activeCtx.widgets, ARDENT_IDLE_WIDGET_KEY)).toMatchObject({ content: undefined });
 
     // And shutdown clears it too.
     const shutdown = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => undefined }))(shutdown.pi);
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => undefined }))(shutdown.pi);
     const shutdownCtx = makeUiCtx();
     await shutdown.handlers.get("session_start")![0]!({}, shutdownCtx.ctx);
     await shutdown.handlers.get("session_shutdown")![0]!({}, shutdownCtx.ctx);
@@ -361,11 +393,12 @@ describe("extension HUD wiring", () => {
   test("restyles the working indicator while engaged, and resets it", async () => {
     const identity: ThemeLike = { fg: (_c, t) => t, bold: (t) => t };
 
-    const { pi, handlers } = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged }))(pi);
+    const { pi, handlers, commands } = createFakePi();
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged }))(pi);
     const { ctx, indicators } = makeUiCtx();
 
     await handlers.get("session_start")![0]!({}, ctx);
+    await startEngagement({ commands }, ctx);
     expect(indicators.at(-1)).toMatchObject({
       frames: workingFrames(identity),
       intervalMs: WORKING_FRAME_MS,
@@ -376,17 +409,18 @@ describe("extension HUD wiring", () => {
 
     // Not engaged: the indicator is explicitly reset, never left as a stale style.
     const idle = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => undefined }))(idle.pi);
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => undefined }))(idle.pi);
     const idleCtx = makeUiCtx();
     await idle.handlers.get("session_start")![0]!({}, idleCtx.ctx);
     expect(idleCtx.indicators.at(-1)).toBeUndefined();
   });
 
   test("mirrors the main-agent lifecycle into the HUD", async () => {
-    const { pi, handlers } = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged }))(pi);
+    const { pi, handlers, commands } = createFakePi();
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged }))(pi);
     const { ctx, widgets } = makeUiCtx();
     await handlers.get("session_start")![0]!({}, ctx);
+    await startEngagement({ commands }, ctx);
 
     // Build the real component so we read the live model the extension writes.
     const component = buildComponent(lastWidgetFor(widgets, ARDENT_HUD_WIDGET_KEY)!.content)!;
@@ -414,8 +448,8 @@ describe("extension HUD wiring", () => {
   });
 
   test("does not touch the UI when there is none", async () => {
-    const { pi, handlers } = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged }))(pi);
+    const { pi, handlers, commands } = createFakePi();
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged }))(pi);
     const widgets: unknown[] = [];
     const noUi = { hasUI: false, mode: "print", cwd: "/tmp", ui: { setWidget: (...a: unknown[]) => widgets.push(a) } } as unknown as ExtensionContext;
     await handlers.get("session_start")![0]!({}, noUi);
@@ -483,6 +517,7 @@ describe("session chrome wiring", () => {
       hasUI: true,
       mode: "tui",
       cwd: "/tmp",
+      sessionManager: { getSessionId: () => "hud-session" },
       ui: {
         setWidget: (key: string, content: unknown, options?: { placement?: string }) =>
           widgets.push({ key, content, placement: options?.placement }),
@@ -501,10 +536,11 @@ describe("session chrome wiring", () => {
   }
 
   test("session_start applies the Ardent theme, status segment, working message and window title", async () => {
-    const { pi, handlers } = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged, modelName: "DeepSeek V4 Flash" }))(pi);
+    const { pi, handlers, commands } = createFakePi();
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged, modelName: "DeepSeek V4 Flash" }))(pi);
     const { ctx, statuses, titles, themes, workingMessages } = richUiCtx();
     await handlers.get("session_start")![0]!({}, ctx);
+    await startEngagement({ commands }, ctx);
 
     expect(themes).toHaveLength(1);
     expect((themes[0] as { name?: string }).name).toBe("ardent");
@@ -514,8 +550,8 @@ describe("session chrome wiring", () => {
   });
 
   test("session_shutdown clears the status segment and the working message", async () => {
-    const { pi, handlers } = createFakePi();
-    factoryOf(createArdentExtension({ loadConfig: () => engaged, modelName: "DeepSeek V4 Flash" }))(pi);
+    const { pi, handlers, commands } = createFakePi();
+    factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged, modelName: "DeepSeek V4 Flash" }))(pi);
     const { ctx, statuses, workingMessages } = richUiCtx();
     await handlers.get("session_start")![0]!({}, ctx);
     await handlers.get("session_shutdown")![0]!({}, ctx);
@@ -527,8 +563,8 @@ describe("session chrome wiring", () => {
     const prior = process.env.ARDENT_THEME;
     process.env.ARDENT_THEME = "off";
     try {
-      const { pi, handlers } = createFakePi();
-      factoryOf(createArdentExtension({ loadConfig: () => engaged }))(pi);
+      const { pi, handlers, commands } = createFakePi();
+      factoryOf(createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engaged }))(pi);
       const { ctx, themes } = richUiCtx();
       await handlers.get("session_start")![0]!({}, ctx);
       expect(themes).toHaveLength(0);

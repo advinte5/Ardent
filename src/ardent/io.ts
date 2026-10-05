@@ -37,7 +37,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArdentConfig, type ArdentConfig } from "./config";
-import type { EvidencePersist, EvidenceRecord } from "./evidence";
+import { isEvidenceRecord, type EvidencePersist, type EvidenceRecord } from "./evidence";
 
 /** Read and parse an engagement config file. Missing/malformed → undefined. */
 export function loadArdentConfigFromFile(filePath: string): ArdentConfig | undefined {
@@ -50,6 +50,13 @@ export function loadArdentConfigFromFile(filePath: string): ArdentConfig | undef
 }
 
 /**
+ * The evidence log's file name, inside one engagement's directory — beside the
+ * engagement journal. One log per engagement is what makes "E2 cannot display
+ * or accept E1's citations" true on disk as well as in memory.
+ */
+export const EVIDENCE_LOG_NAME = "evidence.jsonl";
+
+/**
  * Append-only JSONL evidence sink. One JSON object per line, each with a
  * `kind` discriminant, so the engagement trace can be replayed or read with
  * `jq`. Creates the parent directory on first write.
@@ -57,15 +64,54 @@ export function loadArdentConfigFromFile(filePath: string): ArdentConfig | undef
  * Unlike the working-memory snapshot below, this sink deliberately does NOT
  * swallow write errors: the evidence log is the authoritative record, and a
  * store that reports success over a failed write is worse than one that
- * fails. `EvidenceStore.emit` catches the throw and marks itself degraded,
- * which is the "never claim the evidence is durable until it is committed"
- * rule from the plan.
+ * fails. `EvidenceStore` commits through this sink before it projects the
+ * record, and a throw becomes a typed `storage_unavailable` refusal — the
+ * "never claim the evidence is durable until it is committed" rule.
  */
 export function createJsonlEvidenceSink(filePath: string): EvidencePersist {
   return (record: EvidenceRecord) => {
     mkdirSync(dirname(filePath), { recursive: true });
     appendLine(filePath, `${JSON.stringify(record)}\n`);
   };
+}
+
+/**
+ * Read one engagement's evidence log back, for replay.
+ *
+ * The good prefix is returned either way so an operator can see what is
+ * recoverable, but anything unreadable — a line that is not JSON, a line that
+ * is not one of our records, a directory where the log should be — is a
+ * `fault`, and a fault means the engagement's record cannot be trusted whole.
+ * The store turns that into a degraded (read-only) engagement rather than
+ * guessing what the missing records said.
+ */
+export function readEvidenceLog(filePath: string): { records: EvidenceRecord[]; fault?: string } {
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    // No log yet is the normal first-engagement case, not a fault.
+    if (code === "ENOENT") return { records: [] };
+    return { records: [], fault: `${filePath} could not be read: ${describe(err)}` };
+  }
+  const records: EvidenceRecord[] = [];
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!.trim();
+    if (line === "") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return { records, fault: `${filePath} line ${i + 1} is not JSON (truncated or corrupt log)` };
+    }
+    if (!isEvidenceRecord(parsed)) {
+      return { records, fault: `${filePath} line ${i + 1} is not an evidence record` };
+    }
+    records.push(parsed);
+  }
+  return { records };
 }
 
 /** Synchronously persist a working-memory snapshot next to the evidence log. */

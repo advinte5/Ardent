@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ArtifactStore, Journal, JournalLock, JOURNAL_SCHEMA_VERSION, contentDigest, createJsonlEvidenceSink } from "../src/ardent/io";
+import {
+  ArtifactStore,
+  Journal,
+  JournalLock,
+  JOURNAL_SCHEMA_VERSION,
+  contentDigest,
+  createJsonlEvidenceSink,
+  readEvidenceLog,
+} from "../src/ardent/io";
 import { EvidenceStore } from "../src/ardent/evidence";
 
 function scratch(prefix: string): string {
@@ -437,7 +445,7 @@ describe("evidence sink durability", () => {
     }
   });
 
-  test("a write the sink cannot make reaches the store as degradation, not silence", () => {
+  test("a write the sink cannot make is refused, not reported as recorded", () => {
     const dir = scratch("ardent-sink-");
     try {
       // A file where the evidence log's directory would have to go, so the
@@ -449,15 +457,51 @@ describe("evidence sink durability", () => {
         persist: createJsonlEvidenceSink(join(blocker, "evidence.jsonl")),
         now: () => 1_000,
       });
-      const observation = store.addObservation({ source: "nmap", summary: "port 22 open", target: "10.0.0.5" });
+      const refused = store.addObservation({ source: "nmap", summary: "port 22 open", target: "10.0.0.5" });
 
-      // The engagement kept its record in memory...
-      expect(store.observations).toHaveLength(1);
-      expect(observation.id).toBe("obs-1");
-      // ...and the store now admits the durable copy does not exist.
+      // The command reports the failure...
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.code).toBe("storage_unavailable");
+      // ...the projection does not move, so memory cannot claim a record the
+      // file does not hold...
+      expect(store.observations).toHaveLength(0);
+      expect(store.salvageCount).toBe(1);
+      // ...and the store admits the durable copy does not exist.
       expect(store.degraded).toBe(true);
       expect(store.persistenceError).toBeDefined();
       expect(existsSync(join(blocker, "evidence.jsonl"))).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test("reads a log back for replay, and faults on a line it cannot interpret", () => {
+    const dir = scratch("ardent-sink-read-");
+    try {
+      const path = join(dir, "evidence.jsonl");
+      const store = new EvidenceStore({ persist: createJsonlEvidenceSink(path), now: () => 1_000 });
+      store.addObservation({ source: "nmap", summary: "port 22 open", target: "10.0.0.5" });
+
+      const read = readEvidenceLog(path);
+      expect(read.fault).toBeUndefined();
+      expect(read.records).toHaveLength(1);
+      expect(read.records[0]).toMatchObject({ kind: "observation" });
+
+      // A log that is not there yet is an empty engagement, not a fault.
+      expect(readEvidenceLog(join(dir, "missing.jsonl"))).toEqual({ records: [] });
+
+      // A truncated tail is a fault, and the reader says which line.
+      appendFileSync(path, '{"kind":"observation","value":{"id":"obs-2"');
+      const truncated = readEvidenceLog(path);
+      expect(truncated.records).toHaveLength(1);
+      expect(truncated.fault).toContain("line 2");
+
+      const resumed = new EvidenceStore({ now: () => 1_000 });
+      resumed.replay(truncated.records, truncated.fault);
+      // A faulted replay is a degraded store: nothing new enters it.
+      expect(resumed.degraded).toBe(true);
+      expect(resumed.observations).toHaveLength(1);
+      expect(resumed.addObservation({ source: "x", summary: "y" }).ok).toBe(false);
     } finally {
       cleanup(dir);
     }

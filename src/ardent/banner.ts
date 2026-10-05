@@ -17,6 +17,15 @@ export interface ArdentStatusInput {
   configExists: boolean;
   engaged: boolean;
   label?: string;
+  /**
+   * What *this session* is bound to, present whenever a scope is configured —
+   * bound or not. Once targets exist on disk, "idle — no engagement scope"
+   * would be false: the honest line is which engagement the session holds, or
+   * that it holds none and what to run.
+   */
+  session?: string;
+  /** Storage health, present only when something is wrong with it. */
+  storage?: string;
   targets: string[];
   observations: number;
   findings: number;
@@ -36,18 +45,28 @@ export interface ArdentStatusInput {
 export function statusText(input: ArdentStatusInput): string {
     const head = input.engaged
         ? `ardent ${input.version} · ENGAGEMENT ACTIVE${input.label === undefined ? "" : ` (${input.label})`}`
-        : `ardent ${input.version} · idle — no engagement scope`;
+        : input.session !== undefined
+          ? `ardent ${input.version} · idle — session not bound`
+          : `ardent ${input.version} · idle — no engagement scope`;
     const lines = [`● ${head}`];
 
-    if (input.engaged) {
+    if (input.engaged || input.session !== undefined) {
         const preview = input.targets.slice(0, 6).join(", ");
         const more = input.targets.length > 6 ? ` +${input.targets.length - 6}` : "";
         lines.push(`  ◎ ${input.targets.length} target(s): ${preview}${more}`);
     }
+    if (input.session !== undefined) lines.push(`  session: ${input.session}`);
+    if (input.storage !== undefined) lines.push(`  storage: ${input.storage}`);
     lines.push(
         `  ✦ ${input.observations} observation(s) · ${input.findings} finding(s) · ${input.verified} verified · ${input.relations} relation(s) · ${input.paths} attack path(s)`,
     );
     lines.push(`  config: ${input.configPath}${input.configExists ? "" : "  (missing)"}`);
-    if (!input.engaged) lines.push("  /scope to set up an engagement, or write that config file directly.");
+    if (!input.engaged) {
+        lines.push(
+            input.session !== undefined
+                ? "  /ardent start to create an engagement for this session, or /ardent bind <id> to join an existing one."
+                : "  /scope to set up an engagement, or write that config file directly.",
+        );
+    }
     return lines.join("\n");
 }

@@ -37,7 +37,11 @@ export function getArdentConfigPath(agentDir: string = getFreePiAgentDir()): str
   return join(getArdentDir(agentDir), "engagement.json");
 }
 
-/** The append-only evidence log: `<agentDir>/ardent/evidence.jsonl`. */
-export function getArdentEvidencePath(agentDir: string = getFreePiAgentDir()): string {
-  return join(getArdentDir(agentDir), "evidence.jsonl");
+/**
+ * The engagement repository root: `<agentDir>/ardent/engagements`, holding one
+ * subdirectory per engagement. Deliberately not the config file above — that
+ * one is *what is authorized*, these are *what was done*.
+ */
+export function getArdentEngagementsDir(agentDir: string = getFreePiAgentDir()): string {
+  return join(getArdentDir(agentDir), "engagements");
 }

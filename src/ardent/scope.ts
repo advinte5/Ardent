@@ -122,6 +122,62 @@ export function isEngaged(scope: Scope): boolean {
   return scope.entries.length > 0;
 }
 
+/** True for IPv4 addresses that are loopback, link-local, or RFC1918 private. */
+export function isPrivateIpv4(ip: number): boolean {
+  const a = (ip >>> 24) & 0xff;
+  const b = (ip >>> 16) & 0xff;
+  if (a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true; // link-local
+  return false;
+}
+
+/** Local-looking hostnames: loopback, mDNS, and internal-only suffixes. */
+function isLocalHostname(value: string): boolean {
+  if (value === "localhost" || value === "::1" || value === "[::1]") return true;
+  if (!value.includes(".")) return true; // a single-label host is LAN-scoped
+  return (
+    value.endsWith(".localhost") ||
+    value.endsWith(".local") ||
+    value.endsWith(".internal") ||
+    value.endsWith(".test") ||
+    value.endsWith(".lan")
+  );
+}
+
+/**
+ * True when one scope entry names a target that is plausibly on the public
+ * internet. Deliberately conservative: an entry we cannot prove private is
+ * treated as public, so starting a real engagement requires the explicit
+ * acknowledgment rather than getting it by a parsing accident.
+ */
+export function isPublicTarget(entry: ScopeEntry): boolean {
+  switch (entry.kind) {
+    case "any":
+      return true;
+    case "ip": {
+      const ip = parseIpv4(entry.value);
+      return ip === null ? !isLocalHostname(entry.value) : !isPrivateIpv4(ip);
+    }
+    case "cidr": {
+      // A CIDR is private only when its base is private and the prefix is
+      // narrow enough not to reach a public range. Anything else is public.
+      if (!isPrivateIpv4(entry.network)) return true;
+      return entry.prefix < 8;
+    }
+    case "host":
+      return !isLocalHostname(entry.value);
+    case "wildcard":
+      return !isLocalHostname(entry.suffix);
+  }
+}
+
+/** True when any approved target plausibly lives on the public internet. */
+export function scopeTouchesPublicTarget(scope: Scope): boolean {
+  return scope.entries.some(isPublicTarget);
+}
+
 // Capture only the authority (no path/query) so the extractor yields a host.
 const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/([^\s"'`<>|/]+)/gi;
 const IPV4_HOST_RE = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;

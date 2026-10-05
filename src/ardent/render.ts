@@ -200,30 +200,10 @@ function rejectionReason(contentText: string): string {
     return text.replace(/^(rejected|refused):\s*/i, "") || "rejected";
 }
 
-// ---- Streaming loader + recovery notice ----------------------------------
+// ---- Streaming loader ----------------------------------------------------
 
 /** The message shown in pi's streaming loader while an engagement is active. */
 export const ARDENT_WORKING_MESSAGE = "◈ thinking";
-
-/** Glyph for the refusal-recovery notice. */
-export const RECOVERY_GLYPH = "⟳";
-
-/**
- * The transcript notice shown when the bounded recovery loop re-frames a
- * refusal-shaped reply.
- *
- * It deliberately does NOT echo the instruction that was sent to the model
- * (which reads as if the user said it). It reports the two facts an operator
- * needs: a nudge happened, and the deterministic scope gate did not change.
- */
-export function recoveryNoticeLines(theme: ThemeLike, width: number): string[] {
-    const spans: Span[] = [
-        { text: `${RECOVERY_GLYPH} `, color: "warning" },
-        { text: "authorization reminder", color: "warning", bold: true },
-        { text: " · reply re-framed to restate the engagement scope; the action gate is unchanged", color: "dim" },
-    ];
-    return [INDENT + spanLine(theme, spans, Math.max(0, width - INDENT.length))];
-}
 
 // ---- Working indicator ---------------------------------------------------
 
@@ -357,12 +337,18 @@ export function subagentStatusLine(theme: ThemeLike, progress: SubagentStatusLik
 export const ARDENT_IDLE_WIDGET_KEY = "ardent-idle";
 
 /**
- * The one line shown above the editor when Ardent is installed but no
- * engagement is configured.
+ * The one line shown above the editor when Ardent is present but this session
+ * is not engaged.
  *
  * This exists because "Ardent is present and idle" is otherwise indistinguishable
  * from "Ardent is not installed at all" — both render a byte-for-byte plain
  * free-pi TUI, which is a genuinely confusing failure mode to debug.
+ *
+ * The `hint` is the tail after "idle". It defaults to the never-configured
+ * text; once a scope is configured the caller passes the *reason* this session
+ * is still idle (unbound, store unreadable), because printing "no engagement
+ * scope" over a configured one would be a lie, and this strip is the surface
+ * that owns that message — session start deliberately announces nothing.
  *
  * Built with the same shape as the engaged HUD (brand + model + a reserved
  * status dot), so the two states read as one continuous identity rather than
@@ -370,7 +356,7 @@ export const ARDENT_IDLE_WIDGET_KEY = "ardent-idle";
  * for the same reason the HUD reserves it: it is the one glyph that says which
  * mode Ardent is in.
  */
-export function idleLines(theme: ThemeLike, width: number, modelName?: string): string[] {
+export function idleLines(theme: ThemeLike, width: number, modelName?: string, hint?: string): string[] {
     const dot: Span[] = [{ text: ` ${GLYPH.idle}`, color: "dim" }];
     const dotWidth = dot.reduce((n, s) => n + s.text.length, 0);
 
@@ -384,7 +370,10 @@ export function idleLines(theme: ThemeLike, width: number, modelName?: string): 
         segments.push([{ text: ` · ${modelName}`, color: "muted" }]);
     }
     segments.push([{ text: " · idle", color: "muted" }]);
-    segments.push([dim(" · no engagement scope · /scope to set up · /ardent for status")]);
+    // The tail is state-dependent once a scope exists on disk: "no engagement
+    // scope" would be false the moment one is configured, so the caller says
+    // what is actually missing (a binding, a readable store) instead.
+    segments.push([dim(` · ${hint ?? "no engagement scope · /scope to set up · /ardent for status"}`)]);
 
     const budget = Math.max(0, width - CONT_INDENT.length - dotWidth);
     const head = spanLineParts(theme, segments[0]!, budget);
@@ -723,6 +712,68 @@ export function screenshotResultLines(
         meta.push(dim(`sha256 ${details.sha256.slice(0, 12)}`));
     }
     return resultRow(theme, GLYPH.shot, "success", head, meta.length > 0 ? meta : undefined, width);
+}
+
+// ---- ardent_request ------------------------------------------------------
+
+export interface RequestCallArgs {
+    method: string;
+    url: string;
+    identity?: string;
+    redirect?: string;
+}
+
+/** The call row: method, URL and (if any) the identity reference, never a secret. */
+export function requestCallLines(theme: ThemeLike, args: RequestCallArgs, width: number): string[] {
+    const spans: Span[] = [
+        { text: `${GLYPH.evidence} `, color: "accent" },
+        { text: "ardent_request", color: "toolTitle", bold: true },
+    ];
+    if (args.method) spans.push({ text: ` ${args.method.toUpperCase()}`, color: "accent" });
+    if (args.url) spans.push(dim(` ${oneLine(args.url)}`));
+    if (args.identity) spans.push(dim(` as ${oneLine(args.identity)}`));
+    return [row(theme, spans, width)];
+}
+
+export interface RequestDetailsLike {
+    ok?: boolean;
+    observation_id?: string;
+    status?: number;
+    bytes?: number;
+    truncated?: boolean;
+    sha256?: string;
+    host?: string;
+    hops?: number;
+    redirects?: number;
+    code?: string;
+}
+
+/**
+ * The result row reports the captured outcome (status, proof id, size, hash),
+ * not the URL again — pi renders call and result together, so repeating it
+ * would print it twice at two truncation points.
+ */
+export function requestResultLines(
+    theme: ThemeLike,
+    details: RequestDetailsLike | undefined,
+    contentText: string,
+    width: number,
+): string[] {
+    if (details?.ok === false) {
+        const reason = rejectionReason(contentText) || "request failed";
+        return resultRow(theme, GLYPH.verifyFail, "error", [{ text: "not captured", color: "error", bold: true }], [dim(reason)], width);
+    }
+    const head: Span[] = [{ text: "captured", color: "success", bold: true }];
+    if (details?.status !== undefined) head.push(dim(` ${details.status}`));
+    if (details?.observation_id) head.push({ text: ` ${details.observation_id}`, color: "accent" });
+
+    const pieces: string[] = [];
+    if (details?.bytes !== undefined) pieces.push(formatBytes(details.bytes));
+    if (details?.truncated) pieces.push("truncated");
+    if (details?.redirects !== undefined && details.redirects > 0) pieces.push(`${details.redirects} redirect(s)`);
+    if (details?.sha256) pieces.push(`sha256 ${details.sha256.slice(0, 12)}`);
+    const meta: Span[] = pieces.length === 0 ? [] : [dim(pieces.join(" · "))];
+    return resultRow(theme, GLYPH.evidence, "success", head, meta.length > 0 ? meta : undefined, width);
 }
 
 /** Compact byte size for the result row. */

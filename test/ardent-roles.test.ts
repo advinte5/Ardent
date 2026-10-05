@@ -36,6 +36,11 @@ import {
 import { SAFE_TOOLS } from "../src/provider";
 import { ARDENT_CHILD_TOOL_NAMES, ARDENT_TOOL_NAMES } from "../src/ardent/extension";
 
+/** A fresh engagement repository — a test must never touch the real one. */
+function freshEngagementsDir(): string {
+  return mkdtempSync(join(tmpdir(), "ardent-engagements-"));
+}
+
 describe("role table: shape", () => {
   test("every declared role has an entry, and every entry is a declared role", () => {
     const declared: string[] = [...ARDENT_ROLE_NAMES].sort();
@@ -253,7 +258,7 @@ async function toolsOfferedFor(role: ArdentRole): Promise<Set<string>> {
       agentDir: tempDir("ardent-roles-agent-"),
       childTools: (_depth, r) => toolsForRole(r),
       childExtensions: (_depth, r) => [
-        createArdentChildExtension(state, { depth: 1, maxDepth: 1, role: r }),
+        createArdentChildExtension(state, { engagementsDir: freshEngagementsDir(), depth: 1, maxDepth: 1, role: r }),
       ],
     });
     await runner.runChild({

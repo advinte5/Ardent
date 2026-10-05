@@ -19,7 +19,10 @@ bundle, so the changes are packaged as a patch instead of committed directly.
 | `regenerate.sh` | Rebuilds the patch + manifest from the current working tree |
 
 Base commit (the mirror state the patch was generated against):
-`d8a2252f0445ad133eb3e70b71fad2dea2b0de81`.
+`d8a2252f0445ad133eb3e70b71fad2dea2b0de81` — the last mirror sync, i.e. what
+the monorepo currently holds. `regenerate.sh` derives it from
+`.mirror-state.json` rather than from the local `HEAD`, so the bundle carries
+every Ardent change, including the ones already committed on this branch.
 
 ## Apply
 
@@ -33,7 +36,8 @@ git apply --index port/ardent-port.patch
 `git apply` strips the leading `a/`, so the patch writes to `packages/cli/...`
 (`packages/cli/src/ardent/*`, `packages/cli/src/paths.ts`,
 `packages/cli/src/pi-launch.ts`, `packages/cli/src/onboarding.ts`,
-`packages/cli/src/header.ts`, `packages/cli/test/...`, `packages/cli/ARDENT.md`).
+`packages/cli/src/header.ts`, `packages/cli/eval/*`,
+`packages/cli/tsconfig.json`, `packages/cli/test/...`, `packages/cli/ARDENT.md`).
 
 If context lines have drifted on `main`, apply with 3-way merge. The mirror keeps
 blobs byte-identical, so the base objects resolve:
@@ -51,13 +55,19 @@ From `packages/cli/`:
 bun test          # or: ./node_modules/@oven/bun-linux-x64/bin/bun test
 ```
 
-Expected: typecheck clean and **582 tests, 0 fail** (the pre-Ardent baseline was
-308; this adds 274). One of those is a live screenshot integration test
+Expected: typecheck clean and **722 tests, 0 fail** (the pre-Ardent baseline was
+308). One of those is a live screenshot integration test
 (`test/ardent-screenshot.test.ts`) that skips itself when no browser is
-installed, so a browserless CI runner reports **581 pass, 1 skip**. The
+installed, so a browserless CI runner reports **721 pass, 1 skip**. The
 structural guarantee in `test/no-subagents.test.ts`
 still asserts `maxOpen <= 1`, and `test/ardent-subagent-runtime.test.ts` proves
 nested subagent completions are serialized.
+
+This bundle was verified by applying it to a worktree at the base commit with
+`git apply -p3`, then running typecheck and the suite there: 722 pass, 0 fail,
+byte-identical to the mirror working tree for every ported file. The evaluation
+suite was also run from the ported tree (`bun eval/cli.ts --trials 3`) and
+produced the same results as in the mirror.
 
 > `test/ardent-subagent-runtime.test.ts` measures abort latency against a 400 ms
 > wall-clock budget. It passes comfortably on its own but can flake when the
@@ -67,7 +77,18 @@ nested subagent completions are serialized.
 
 - **No dependency or manifest changes.** `package.json` and the lockfile are
   untouched; Ardent only uses `typebox` and `@earendil-works/pi-coding-agent`,
-  both already present.
+  both already present. `tsconfig.json` gains `eval/**/*.ts` in `include` so the
+  ported evaluation harness typechecks beside the tests that import it.
+- **Evaluation harness (P0).** `eval/` carries the declared 16-case evaluation
+  manifest, the resettable W01/W02 fixture in vulnerable and secured variants, a
+  grader that reads fixture truth rather than the agent's prose, a deterministic
+  driver that goes through the real extension and `tool_call` gate, and a suite
+  runner. Run it with `bun eval/cli.ts --trials 3`; artifacts land under
+  `<agentDir>/ardent/evals/`. It introduces no new dependency and no credential:
+  manifests carry credential *references*, and reports carry marker digests. Its
+  tests are `test/ardent-eval-protocol.test.ts` and
+  `test/ardent-eval-fixture.test.ts`. This is a deterministic runtime/fixture
+  baseline only — no model was run, and no accuracy claim follows from it.
 - **TUI workover (ops console).** The TUI now carries a visual identity. A new
   `src/ardent/theme.ts` builds an in-memory pi `Theme` (graphite + amber) at the
   terminal's exact colour mode and applies it via `ctx.ui.setTheme(instance)` on
@@ -83,12 +104,47 @@ nested subagent completions are serialized.
   built-in footer is intentionally not replaced (it carries pwd, context usage and
   the model). `/scope` is read-only: a scope change is an authorization change and
   there is deliberately no silent config writer yet.
-- **Refusal handling is prompt + one bounded nudge, never a gate change.**
-  `src/ardent/refusal.ts` detects a first-person refusal in the assistant's own
-  reply and, at most once per user objective, injects an authorization reminder
-  that restarts the turn. It re-authorizes declining anything genuinely out of
-  scope and leaves the deterministic scope gate untouched. See `ARDENT.md`,
-  “Refusals on authorized work” and “The recovery loop.”
+- **The refusal-recovery loop is REMOVED.** `src/ardent/refusal.ts` and
+  `test/ardent-refusal.test.ts` are deleted by this patch: an assistant reply
+  that declines authorized work is no longer answered with an authorization
+  reminder. The scoped brief and the deterministic action gate are the durable
+  controls. See `ARDENT.md` and `ARDENT-ENGAGEMENT-PLAN.md`.
+- **Evidence is owned per engagement.** `EngagementStore.evidenceFor(id)` owns
+  `<agentDir>/ardent/engagements/<id>/evidence.jsonl` and replays it on first
+  use. `src/ardent/paths.ts` therefore drops `getArdentEvidencePath` (the old
+  single flat log) and `pi-launch.ts` stops wiring a process-wide evidence
+  sink. A verification now needs proof the harness captured itself
+  (`origin: "runtime"`). `ardent_request` (below) supplies such proof; without a
+  captured exchange a finding still stays a candidate.
+  Acceptance tests: `test/ardent-evidence-ownership.test.ts`.
+- **Bounded captured HTTP (P4).** New `src/ardent/http.ts` is the one target
+  execution path: it checks scope before every hop, binds credential material to
+  its own origin, bounds redirects/bytes/timeout, and encodes query/form values.
+  `ardent_request` exposes it and records the exchange as a runtime-origin
+  observation, so citing its id can verify a finding. It joins
+  `ARDENT_EVIDENCE_TOOL_NAMES` and the executor/recon/verifier role lists (never
+  `planner`), and `createArdentExtension` gains an injected
+  `identities?: IdentityResolver` — production has none, so an `identity`
+  argument fails closed as `identity_unavailable`. Acceptance tests:
+  `test/ardent-http.test.ts` (14) and `test/ardent-request-tool.test.ts` (3).
+  The evaluation grader's captured-proof check now resolves a cited id against
+  the set of captures rather than only the first — a correctness fix, not a
+  relaxation: a run legitimately makes more than one captured request.
+- **Identity resolution and authorization freeze (P4 follow-on).** New
+  `src/ardent/identities.ts` builds the `ardent_request` identity resolver from a
+  config `identities` block, where each reference names a secret SOURCE
+  (`cookie_env`/`headers_env`/`cookie_file`/`headers_file`), never a value; an
+  unresolved reference fails closed as `identity_unavailable`. The config also
+  gains `authorizationRef` and `acknowledgeLive`. `authorizationDigest()` is
+  frozen onto the engagement at creation, and the gate, brief and HTTP tool use
+  the engagement's scope rather than the config's, so a config edit is refused
+  as drift at `/ardent start` instead of silently widening scope. Starting a
+  public-target scope without `acknowledgeLive: true` is refused. Tests:
+  `test/ardent-identities.test.ts`, `test/ardent-authorization.test.ts`.
+- **Existing flat evidence logs are not migrated.** A
+  `<agentDir>/ardent/evidence.jsonl` from an earlier build is left untouched and
+  unread; the plan requires an operator-mapped migration rather than guessing
+  which engagement those records belong to.
 - **New tools in the allowlist.** `spawn_agent` joined `ALLOWED_TOOL_NAMES` in
   `src/pi-launch.ts`. It is gated on an active engagement and is
   `executionMode: "sequential"`, so the no-concurrent-completion guarantee holds.

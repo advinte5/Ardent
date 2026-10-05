@@ -6,7 +6,7 @@ Research and proposed implementation plan — 2026-10-04.
 
 Optimize first for authorized web applications and APIs, including authenticated roles and business workflows (operator-selected focus). Preserve ad-funded inference, the existing pi runtime, and host-only v1. This document proposes architecture; it does not claim an implementation, measured improvement, independently validated Neo performance, or comprehensive scope enforcement.
 
-Source changes must happen in the authoritative upstream workspace, not this generated mirror. No source changes or dependency installations were made for this research.
+Source changes must happen in the authoritative upstream workspace, not this generated mirror. This review edits planning documents only; existing source changes in this checkout are preserved, not authorization to extend them.
 
 Primary objective: maximize independently reproducible, distinct, consequential findings within approved scope and a declared resource budget. Secondary objective: improve useful exploration of unexpected paths without reducing precision. Neither more findings, more agents, longer reports, nor model-reported confidence alone is success.
 
@@ -66,28 +66,115 @@ Primary objective: maximize independently reproducible, distinct, consequential 
     - Vendor describes shared persistent context, coordinated specialists, isolated execution, reproducible findings, and retesting fixes.
     - Useful product comparison, not access to its internals or an independent benchmark. Do not infer that copying its agent count yields its claimed results.
 
+## Implementation status — reviewed 2026-10-05
+
+`ARDENT.md` describes the prototype and operator commands; this document owns the proposed delivery contract. Neither a package label nor a passing helper suite closes an end-to-end acceptance gate.
+
+| Package | Current evidence | Remaining gate |
+| --- | --- | --- |
+| P0 | Fixture protocol, resettable W01/W02 fixture, hidden grader, deterministic driver and suite runner exist; baseline artifacts captured under `eval/` | Model trials (deterministic-only today), capability probes, and fixtures for W03–W16 |
+| P1 | Empty/missing citations rejected; bare verification claims unvalidated; a verdict now requires harness-captured proof; assessment errors blocked | Execution provenance (runtime-origin records) and bounded assertions still missing, so nothing promotes yet |
+| P2 | Engagement journal/replay, locks and artifact storage primitives exist; each engagement now owns its evidence log, commits before projecting, and replays it on resume | Working-memory rehydration, export/retest, and legacy-log migration unmapped |
+| P3 | `/ardent start`, `bind`, `release`, `unlock` resolve durable bindings; evidence commands go through `EngagementStore.evidenceFor(id)`; a child assignment is pinned to its engagement for the run | Real SDK switch/fork behavior unexercised (a mid-run switch blocks, see below); working memory still process-local |
+| P4 | Bounded `ardent_request` adapter: per-hop scope, origin-bound credentials, redirect/byte/timeout bounds, and captured exchanges recorded as runtime-origin observations. A config-driven identity resolver makes supplied accounts usable, and the engagement now freezes its scope+authorization (drift refused). W01 runs `demonstrated` 3/3 | Remaining HTTP cases (W03–W16) still need fixtures; browser/network capture beyond structured HTTP |
+| P5–P7 | Delivery contract below, not completed features | Experiment registration, fresh verification, export/retest and repeated trials |
+
+Review checks: `./node_modules/.bin/tsc --noEmit` exited 0; `./node_modules/@oven/bun-linux-x64/bin/bun test` exited 0 with **722 pass, 0 fail, 2,745 assertions across 56 files**. These results cover the current checkout, including pre-existing uncommitted source changes. They do not establish live engagement accuracy, provider capabilities, successful operator package use, or a performance improvement.
+
+### Completed checkpoint: evidence ownership (2026-10-05)
+
+Evidence commands now run through the bound engagement's repository and replay the resulting records. `EngagementStore.evidenceFor(id)` owns `<engagementDir>/evidence.jsonl`, memoized per engagement; the evidence tools, HUD counts, `/findings`, `/posture` and `/ardent status` all read that one projection, so a second engagement can neither display nor accept the first one's citations. The store commits to the log before projecting and refuses afterwards on failure, keeping the bytes as labelled salvage. A verdict now requires proof the harness captured itself (`origin: "runtime"`), so a cited model-written note plus `passed: true` records an `unvalidated` attempt; replay re-derives every imported outcome under the current rule and never upgrades a label, while keeping the ids so citations still resolve. `spawn_agent` pins each assignment to its engagement for the run, and a session switch observed mid-assignment blocks target dispatch and evidence work with `cancelled` until an operator explicitly starts or binds.
+
+Acceptance through the operator/runtime interface, in `test/ardent-evidence-ownership.test.ts`:
+
+1. Start engagement E1, record a note and candidate, release, then start E2. E2 must neither display nor accept E1 citations; counts, tools and reports use the same engagement projection. **Met** — verified against `/ardent status`, `/findings`, both tool refusals, and the two logs on disk.
+2. Resume the original bound session in a new process. E1's committed records, IDs and dispositions must survive; new IDs must not collide. Working-memory ownership must also be explicit, even if full memory replay is deferred. **Partly met** — records, ids and dispositions survive and do not collide; working memory is still process-local and explicitly unrehydrated (documented in `ARDENT.md`).
+3. Inject append/flush failure. The command must not return durable success or advance the committed projection; subsequent target dispatch is blocked. Any retained uncommitted output is explicitly labeled salvage data, not report evidence. **Met** — verified with the log's own path replaced by a directory so the real append fails.
+4. A cited model-written note plus `passed: true` must not qualify as runtime-verified proof. Preserve it as an unvalidated claim until P4/P5 supply execution provenance and accepted assertions. Do not upgrade old verification labels during import/replay. **Met** — and the consequence is recorded: nothing promotes in v1, so findings stay candidates until P4 supplies runtime-origin records.
+5. Switch/fork while work is active: test how the installed SDK actually behaves. Child assignments remain pinned to their engagement/run, never whichever binding the UI happens to select later. If safe cancellation/settlement cannot yet be guaranteed, block that transition visibly. **Partly met** — the pin and the visible block are implemented and tested against a simulated switch; the installed SDK's real fork/switch behavior during an open run remains unexercised. Do not read the block as evidence that switching is safe.
+
+Remaining gaps this checkpoint did not close: working-memory rehydration, an export/retest path for salvage and committed evidence, legacy flat-log migration (see below), and the `attackPaths` single-edge walk.
+
+### Completed checkpoint: P0 fixture protocol and W01/W02 baseline (2026-10-05)
+
+A declared evaluation manifest with a deliberate hidden/visible split, a resettable local fixture in two variants, a grader that reads fixture truth rather than prose, a deterministic driver that uses the shipped commands and the real `tool_call` gate, and a suite runner that writes trial artifacts outside committed source.
+
+- `eval/protocol.ts` — manifest schema (typebox) with `additionalProperties: false`, schema-version refusal, and `investigatorView()`, which builds the visible half field by field so a hidden field added later cannot leak by default.
+- `eval/cases.ts` — all sixteen W01–W16 cases declared with scope, credential *references* (no secrets), budgets, splits and hidden expectations. Declaring a case that has no fixture is the point: the runner refuses it rather than skipping it.
+- `eval/fixture-app.ts` — two loopback planes: the in-scope app (two accounts, one object each, one shared object, per-trial rotated ids/markers, server-side request log) and a harness-only control plane on its own port that refuses and records any request without the harness token. Reports carry marker digests, never markers or passwords.
+- `eval/grader.ts` — grades from the fixture's own request log and the engine's projections. A verified finding without harness-captured proof is `unproven_verified` and `unexpected`, never `as_expected`.
+- `eval/harness.ts` + `eval/driver.ts` — drive the real `createArdentExtension` over a real engagement store: `/ardent start`, the gate before every contact, the evidence tools, `ardent_verify`. No privileged API and no access to the control plane. The driver's requests are shell `curl` commands the gate assesses first, because this build has no HTTP tool yet — that is the honest baseline, not a workaround.
+- `eval/runner.ts` + `eval/cli.ts` — `bun eval/cli.ts --trials 3` writes `run.json`, per-trial `trial.json`/`trace.jsonl`/`grading.json`, `summary.json` and `summary.md` under `<agentDir>/ardent/evals/<suiteRunId>/`. Missing usage is `null`, never zero; every trial is stamped `model:null`.
+
+Baseline result on W01 (vulnerable) and W02 (secured), three trials each, seeds 1000:
+
+- **W02** — `no_finding`, as expected, consistent across all three trials. `fixture.protected_content_withheld`, `scope.excluded_origin_untouched` and `runtime.verified_requires_captured_proof` all pass.
+- **W01** — the seeded boundary crossing is observed (`fixture.boundary_crossed` passes 3/3), but the run can only record a candidate: `observed=candidate_only`, `outcome=inconclusive`, with `capability.captured_execution_provenance` failing and `captured-execution provenance for HTTP requests (plan P4)` named as the gap. No finding is verified, so `verifiedFindings` is 0. This is the intended fail-closed state, not a regression: the demonstration path is unreachable until P4 supplies runtime-origin records.
+
+Acceptance through the actual interface, in `test/ardent-eval-protocol.test.ts` and `test/ardent-eval-fixture.test.ts`: hidden expectations absent from every investigator view (including a field added later), typo'd/unknown manifest fields and unknown case ids refused with the offending name, reset rotating ids+markers and clearing the log, both variants behaving as seeded, the control plane recording an unauthenticated visitor, and a handwritten "verified" record graded `unexpected`.
+
+Not done in this checkpoint: live model trials (deterministic drivers only — a runtime/fixture baseline, not a quality measurement), fixtures for W03–W16, capability probes, and repeated-trial uncertainty analysis. `eval/` and `tsconfig.json` are added to the port bundle so the ported `test/ardent-eval-*.test.ts` files resolve.
+
+### Completed checkpoint: P4 bounded captured HTTP (2026-10-05)
+
+The path that makes a verdict reachable. `src/ardent/http.ts` is a bounded, injectable HTTP adapter; `ardent_request` exposes it as a tool, and the exchange is recorded as a runtime-origin observation — the one kind of proof that can carry a verification.
+
+- **Scope before every hop.** `redirect: "manual"` walks the chain one hop at a time; `isOriginAllowed` runs before each contact, so a redirect into an unapproved origin is refused having sent nothing to it. A `deny` policy stops at the first 3xx.
+- **Origin-bound credentials.** The secret adapter resolves an engagement-scoped identity *reference* to material bound to the origin it was resolved for; a cross-origin hop is sent bare. Records carry request header NAMES only, never values, so a secret cannot leak into a trace or an observation.
+- **Bounded and encoding-safe.** Timeout, redirect count and response bytes are fixed limits the model cannot raise; bodies are read with a streaming cap; query and form values are encoded with `URLSearchParams` so a value that means `a&b=c` stays that.
+- **Captured, not retyped.** The tool records what the harness itself received (`origin: "runtime"`), with a sha256 of the body; the deterministic driver now reaches the boundary through this tool instead of a shell `curl`.
+
+Interface changes: `createArdentExtension` takes an `identities?: IdentityResolver`; `ardent_request` joins the evidence tool set and the executor/recon/verifier role lists (never `planner`).
+
+Baseline on W01/W02, three trials each, seeds 1000 (vulnerable then secured):
+
+- **W01** — `demonstrated` 3/3, `as_expected`. The cross-account read is captured, recorded as a runtime-origin observation, and verified against it; `runtime.verified_requires_captured_proof` and `capability.captured_execution_provenance` both pass.
+- **W02** — `no_finding` 3/3, `as_expected`. The secured exchange is still a runtime-origin observation, but it carries no protected marker, so the driver files nothing — the guard is exercised, not bypassed.
+
+Grader correctness fix: `verificationHasCapturedProof` now resolves a cited proof id against the SET of harness captures rather than only the first, because a run legitimately captures more than one exchange (the boundary read is not the first). This is what the P0 grader assumed; without it, W01 mis-grades as `unproven_verified`.
+
+Acceptance through the real tool and fixture, in `test/ardent-http.test.ts` (14 tests) and `test/ardent-request-tool.test.ts` (3 tests): scope denial before contact, cross-origin credential stripping, header names without values, redirect/byte/timeout bounds, encoding round-trip, and the capture reaching the engagement's durable log as `origin: "runtime"`.
+
+Not done in this checkpoint: fixtures for W03–W16; browser/DOM/network capture beyond structured HTTP; response artifacts stored as retrievable files (the captured bytes live in the observation's `raw`, hashed, for v1).
+
+### Follow-on: identity resolution and authorization freeze (2026-10-05)
+
+The half of P4 that makes authenticated work reachable, plus the authorization discipline a real engagement needs.
+
+- **Config-driven identities.** `src/ardent/identities.ts` builds an `IdentityResolver` from the config's `identities` block. Each reference names a **source** (`cookie_env`/`headers_env` or `cookie_file`/`headers_file`), never a secret; the secret is read at call time and the adapter binds it to its own origin. An unresolved reference fails closed as `identity_unavailable` — never a silent anonymous request.
+- **Frozen authorization.** `authorizationDigest(scope, authorizationRef)` is a sha256 of the normalized targets and sanction, recorded on the engagement at creation. The gate, the injection brief and `ardent_request` all use the engagement's **frozen** scope, not the config's, and `/ardent start` refuses to re-activate an engagement whose configured scope has drifted — a changed scope is a new engagement, not a mutation.
+- **Live-target acknowledgment.** A scope naming a public (non-loopback, non-RFC1918) target requires `acknowledgeLive: true` in the config; otherwise `/ardent start` refuses. `scopeTouchesPublicTarget` is conservative: an entry it cannot prove private counts as public.
+
+Acceptance: `test/ardent-identities.test.ts` (10) covers env/file resolution, malformed blocks and fail-closed cases; `test/ardent-authorization.test.ts` (9) covers digest stability, public-target detection, the acknowledgment refusal, drift refusal across two sessions on one store, and an env-backed identity reaching a fixture target end to end.
+
+Not done: `bind` does not yet apply the drift check (only `start` does), and the live-target rule is a scope-parser heuristic — a hostname that resolves to a public address is not detected.
+
+### Next checkpoint
+
+Deliver P5 on the W01/W02 slice: register the ownership experiment, and add a fresh verification attempt that independently re-runs the captured exchange under a control — a `supported` verdict from a profile the investigator did not author, with no model-boolean promotion. Deterministic drivers first; model trials use the same commands, not a separate privileged execution path. P0 fixture work for W03–W16 can run alongside.
+
 ## Verified local gaps
 
-Inspected current source, including extension.ts, evidence.ts, io.ts, types.ts, memory.ts, roles.ts, subagent.ts, subagent-runtime.ts, screenshot.ts, pi-launch.ts, paths.ts, and installed pi extension event declarations.
+The original research inspected extension.ts, evidence.ts, io.ts, types.ts, memory.ts, roles.ts, subagent.ts, subagent-runtime.ts, screenshot.ts, pi-launch.ts, paths.ts, and installed pi extension declarations. The review below updates the evidence/application/binding claims against the current checkout; other findings remain limitations to retest, not newly certified behavior.
 
-- extension.ts (1,272 lines at inspection) combines domain commands, lifecycle, policy, evidence, screenshot and worker operations, and UI.
-- EvidenceStore.addFinding validates supplied IDs but accepts zero citations; the tool schema also permits an empty array.
-- Verification accepts a passed boolean and prose method without requiring a fresh execution record, cited outcome, or control. Executor/general roles can verify their own candidates.
-- Observation recording is model-authored summary text, not automatically linked to an immutable source execution. Valid IDs do not establish that the referenced claim is true.
-- Persist callbacks and the JSONL sink swallow write failures. IDs restart from a process-local sequence. There is no complete evidence reload path.
+- extension.ts has grown to 1,950 lines in this checkout and still combines lifecycle, policy, evidence, screenshots, workers and UI. Engagement commands now have an application seam; extracting everything at once is not the next checkpoint.
+- `EvidenceStore` now commits through the engaged sink before projecting and rejects empty/unknown citations; the removed optional `status` input and the origin gate close the authority-bypass seams (2026-10-05). The arrays stay publicly readable, and `setHypothesisStatus` still mutates without an application command — a resume/ownership hole for hypotheses, not findings.
+- Verification requires proof IDs that the harness captured (`origin: "runtime"` observation, or a non-screenshot artifact the capture path wrote) and still rejects screenshot-only proof. The outcome is derived from provenance plus the supplied passed/inconclusive flags, not from independently evaluated source bytes; executor/general roles can still call `ardent_verify`, they just cannot promote with it. Citation presence is not proof validity, and nothing promotes until P4 supplies runtime-origin records.
+- Observation recording is model-authored summary text by default, and such a record is never proof. Valid IDs still do not establish that the referenced claim is true; only a runtime-origin record asserts that the harness saw the bytes.
+- The JSONL sink throws on failure; `EvidenceStore` commits before projecting, so a failed write returns `storage_unavailable`, leaves the projection unchanged, and keeps the bytes as labelled salvage — the original operation can no longer report success over a hole, and a degraded store then refuses further records outright. IDs now survive reload per engagement (`replay` re-derives dispositions and bumps the sequence past imported ids); the store still has no export path, and working memory has no reload path of its own. Engagement metadata has a separate journal/replay contract; do not conflate the two.
 - Hypothesis type/store helpers exist, but no complete first-class hypothesis/experiment workflow is wired into the tool interface.
 - Finding relationships do not model assets, identities, workflows, or prerequisites. attackPaths follows the first outgoing enables relation, omitting branches; report paths can contain unverified findings.
-- The gate inspects argument strings, not OS/network behavior. Its extension handler returns without blocking if assessAction throws. Prompt wording overstates enforcement.
+- Assessment exceptions now block the tool call. The gate still inspects argument strings, not OS/network behavior; fail-closed error handling does not provide network confinement. Prompt/documentation claims of mechanically blocking all egress overstate this boundary.
 - Working memory uses strings, capped lists, and tail slicing; it can omit pending tasks from injected context and adds an elision prefix beyond the nominal character budget.
 - Child results are text plus an aborted flag. Empty output can become tool success. Retry of an empty child restarts a whole task, which may duplicate side effects; provider errors are not reliably classified.
 - Child model selection starts from the first catalog item rather than an explicit assignment. Actual provider capabilities must be measured, not assumed from advertised metadata.
-- Shared child state and a common evidence destination do not provide durable engagement/session ownership or per-resource mutation scheduling.
+- Explicit durable engagement/session bindings now exist in the working tree. Evidence/memory are still shared process state and the evidence destination remains flat. Binding metadata alone does not isolate their records or provide per-resource mutation scheduling.
 - Current screenshot capture launches host Chromium for a viewport image. It does not supply persistent, authenticated, multi-role browser investigation or comprehensive request capture.
 - Installed SDK exposes session switching/shutdown, tool call/results, model selection and message events. Their presence does not prove all signals propagate correctly in nested sessions; adapter tests are required.
 
-A local no-network Bun probe against EvidenceStore confirmed that an empty-citation finding is accepted and a model-asserted verification promotes it despite a persist callback throwing `disk full`. This exercises the current domain interface, not a complete engagement.
+The earlier no-network probe exposed empty-citation acceptance and assertion-only promotion despite a write fault. Empty citations and bare verification claims have since been tightened; that historical result must not be presented as current behavior. A fresh no-network probe during this review confirmed that a model-authored note plus `passed: true` promotes a candidate without any execution. Inspection also shows failed persistence leaves memory ahead of the durable log.
 
-Existing tests cover useful helpers, but this research did not rerun or certify the suite, live provider behavior, keyboard workflows, or complete engagements.
+The review reran typecheck and the test suite (results above). Live provider behavior, real keyboard/lifecycle flows and complete engagements remain unverified.
 
 ## Recommended architecture
 
@@ -133,6 +220,95 @@ Use versioned schemas, runtime validation, stable globally unique IDs, engagemen
 
 Names are architectural seams, not a request for a class/interface per tiny operation.
 
+### Architecture decisions: ownership and authority
+
+These are proposed v1 decisions, not claims about the prototype. Keep one local process and one authoritative writer for an open engagement. The present store opens multiple engagement journals; independent concurrent engagement processes are not a v1 guarantee. Do not add distributed coordination to solve a local ownership problem.
+
+| Concern | Authority | Agent/UI contribution | Forbidden shortcut |
+| --- | --- | --- | --- |
+| Authorization | Operator-approved, immutable policy revision | Propose a change; display current revision | Target text, discovery or a role label enlarges scope |
+| Identity | Secret adapter resolves engagement-scoped identity reference | Select an authorized reference; describe intended role | Model declares itself authenticated or supplies another account's authority |
+| Target execution | Application dispatches through bounded adapter | Propose exact action/spec | Tool handler dispatches first and records a note afterward |
+| Source evidence | Adapter captures execution and bytes; repository commits ownership | Annotate with interpretation | Model-authored prose becomes a source execution |
+| Verification | Registered proof profile evaluates fresh source evidence | Propose candidate/reproduction; explain limitations | Agent sets final status, evaluator code or acceptance rules |
+| Reports | Projection of committed records and accepted proof | Request export; operator records review separately | UI edits finding status or treats confidence as proof |
+| Work scheduling | Application reserves budgets and resource ownership | Lead ranks useful questions | Worker starts unbounded descendants or concurrent mutations |
+
+An agent role limits capabilities; it is not an evidence provenance class. Operator review can accept a business-policy interpretation, but cannot manufacture missing runtime evidence. Preserve separate labels for a model claim, an operator-reviewed claim and a runtime-supported finding.
+
+### One engagement aggregate; separate run context
+
+For v1, the engagement is the consistency boundary: authorization revisions, session bindings, runs, hypotheses, experiments, evidence and finding dispositions belong to its journal. Artifact bytes sit beside it. Commands validate every referenced record's engagement before commit. The serialized writer owns mutation; read models return snapshots, not mutable arrays. Avoid separate stores that can independently update the same finding or authorization.
+
+A **session** is a transcript/UI identity, not the engagement itself. A **run** is a bounded assignment, not a mutable global current agent. At admission, give the runtime a pinned context containing engagementId, runId, parentRunId, actor capabilities, policy revision, allowed identity references, deadline and budget reservation. Adapters supply this context; model arguments cannot replace it. Session switches change the view/binding for future assignments, never an admitted run's ownership.
+
+The **frontier** is durable domain state: open questions, hypotheses, prerequisites, attempts, contradictions and follow-ups. **Working memory** is a rebuildable context projection for a run. Persist operator notes and durable investigation decisions as records; never make a lossy injected summary the only copy of a pending task. Read projections for other engagements cannot enter the model context merely because they share a process.
+
+Commands have optimistic expected revisions; execution does not hold a transaction or writer queue open while waiting on the network. Admit and commit intent, release the writer, execute, then submit a correlated completion command at the current revision. A stale completion is reconciled against its execution ID and immutable intent, not rerun. Pausing/revoking authorization stops further dispatch, but does not discard the outcome of an already-dispatched action.
+
+### Execution transaction: local durability, external uncertainty
+
+Use this state vocabulary separately from the run's terminal outcome:
+
+```text
+proposed -> awaiting_approval -> admitted -> dispatching -> captured -> committed
+                 |                 |             |
+              rejected         cancelled     interrupted_unknown
+```
+
+Approval is required only when policy demands it; an admitted action already has a committed intent and reservations. `dispatching` means dispatch may have begun, not proof that the remote server applied it. `captured` is local output awaiting durable commitment, never reportable as committed evidence. Rejection/cancellation before dispatch is known not to have sent traffic. A later cancellation or timeout can leave an unknown remote effect.
+
+1. Validate a bounded, versioned spec and resolve allowed identity references. Bind any approval to the exact normalized action/spec digest, policy revision and expiry. A material change invalidates approval.
+2. At the writer boundary recheck lifecycle, authorization, deadline and resource availability; atomically reserve request/budget units and resource ownership with execution intent. No network dispatch if that commit fails.
+3. Immediately before each actual request, including redirect hops, recheck current authorization and cancellation. Do not use an older approved revision after revocation. Reject changed policy and require renewed admission rather than silently widening an existing spec.
+4. The adapter captures input/output metadata and bounded bytes. Actual credential values remain within secret resolution and restricted capture, not model-visible normalized action records.
+5. Finalize artifact bytes before committing their references, execution outcome and reservation settlement. Only then publish updated read models. If storage fails, retain a labeled salvage result, enter degraded mode and stop new state-changing dispatch; read-only target actions may continue.
+6. Recovery replays committed state. An intent with no committed outcome becomes interrupted/unknown; neither a missing outcome nor a known command ID grants retry permission. Operator reconciliation or a new authorized experiment is a separate recorded action.
+
+This is not an atomic transaction with a target. A crash between intent and dispatch is indistinguishable from some crashes after dispatch unless an independently trustworthy outcome exists. Favor honest uncertainty over automatic recovery that duplicates a mutation. Cleanup is also an authorized, budgeted target action; stopping or revoking an engagement does not silently authorize it. Report outstanding cleanup when it cannot be performed.
+
+Target-request budget counts every actual hop/attempt, not just tool calls. Admission reserves a bounded allowance; unused units are released only when safely settled. Unknown completion consumes its possible allowance conservatively until explicit reconciliation. Completion-lease capacity, target request rates, run budgets, evidence byte limits and server-resource locks are distinct controls. No negotiated inference concurrency implicitly increases target concurrency.
+
+### Verification is evaluation, not another agent verdict
+
+Keep four layers explicit:
+
+1. **Source:** adapter-origin execution records and retrievable bytes, with identity, policy, truncation and outcome metadata.
+2. **Interpretation:** observations/hypotheses that cite sources; model/operator/manual origin remains visible.
+3. **Candidate:** a bounded proposed claim and impact, never a caller-supplied verified status.
+4. **Accepted proof:** a versioned registered proof profile plus a fresh verification attempt whose required sources, controls, prerequisites and assertions qualify.
+
+The investigator can choose a creative test or propose a novel claim; it cannot invent a weak acceptance rule and declare that rule sufficient. An unrecognized claim remains a candidate for operator review or a new reviewed proof profile. Keep built-in assertion primitives narrow and bounded. Profile version/digest and input artifact references are recorded so re-evaluation is auditable; changing a profile creates a new assessment, not a rewrite of history.
+
+A fresh verifier context reduces narrative contamination but has no status-setting privilege. It requests reproduction through the same execution service and receives captured results. The application evaluates proof completeness and supported outcomes. Verification's source captures may share target prerequisites with discovery, but cannot merely cite discovery observations as a fresh rerun. Missing auth, failed setup, incomplete bytes or ambiguous controls produce inconclusive, not a refutation or pass.
+
+A demonstration graph is derived separately from the exploration graph. To report A -> B as demonstrated, qualify A and B **and** capture the transition/prerequisite linking them under compatible identity/environment conditions. Two individually verified nodes do not establish a working chain. Bounded branching traversal must not suppress alternate paths or loop indefinitely.
+
+### Authorization revisions and retesting
+
+An authorization reference is a pointer, not proof that the file's current contents match what was approved. Store the approved normalized policy revision and digest with operator provenance; do not dereference a mutable config path and silently adopt new authority. Scope reductions/revocation apply to future dispatch immediately; expansions require explicit approval and a new revision. Artifacts and historical findings retain the revision actually used.
+
+A paused engagement can resume only under explicit current authorization. A closed engagement admits no new target work: retesting creates a new engagement linked to the historical finding/package, with renewed policy and identity references. Closure does not reject late outcome/settlement records for already-admitted actions; those append historical facts without authorizing another dispatch. New verification results can be shown beside the old finding via read projections without reopening or rewriting its journal. If a later design needs in-engagement retest authorizations, decide and test that lifecycle separately rather than mixing both semantics.
+
+### M1 architecture exclusions
+
+No agent framework replacement, remote control plane, vector database, plugin-authored privileged evaluator, compulsory agent swarm or browser adoption is needed to prove these boundaries. A module is justified by a distinct authority or replaceable adapter, not by the number of nouns in the domain. Preserve the pi runtime and ad-funded provider; advertising is UI-only and never a target-execution capability.
+
+### Safety review: authorize and prove (2026-10-04)
+
+Governing test for every control: **does it establish authorization or proof?** A control that only expresses the system's self-doubt — second-guessing the model, the operator or its own parser — is friction and should be removed unless a failing evaluation case justifies keeping it. Authorization (scope, binding, approval, revocation) and proof (cited source evidence, fresh reproduction, controls) are not safety theater; removing them yields invalid engagements and false findings, which is the opposite of the engagement objective.
+
+Decisions:
+
+- **Delete the refusal-recovery loop.** The bounded per-objective nudge, first-person refusal detection and its message machinery exist to re-authorize a model that declined once. A correctly scoped brief and a real technique envelope are the durable fix. Keep, at most, a single static brief line stating authorization and the gate's role. This removes a subsystem whose only purpose is arguing with the model.
+- **Scope read-only mode to mutations.** A failed audit write must not permit new *state-changing* target actions or any claim of durable success, but it must not stop read-only target work or local investigation. Read-only actions (GET-like, non-mutating observations) remain available; the gate blocks only actions that could change target state. Reconsider the sticky behavior: a run should be able to return to normal after a subsequent write succeeds and the gap is surfaced, rather than being a permanent dead end with no rehydration or export path. Never claim the missing record was committed.
+
+Status (2026-10-04): both landed on `wip/ardent`. `src/ardent/refusal.ts` and `test/ardent-refusal.test.ts` are deleted; the `agent_settled` hook and the recovery message renderer are gone. The gate's degraded branch now calls `isStateChanging` — a small positive list of mutations (mutating HTTP method, body/upload flag, known mutating tool, or a target-capable tool with no declared method) — and lets read-only observation through. The sticky-flag rehydration question is still open.
+
+Deferred pending evidence (not yet removed, listed so the review is honest): relaxing fail-closed assessment errors to an operator `confirm` in interactive sessions, and narrowing the broad credential/elevation confirm patterns. Both are plausible friction, but each changes a boundary decision and should be justified by a failing evaluation case before adoption.
+
+Related and also measured, not assumed: **adversarial mission framing** — replacing the brief's explicit-authorization and anti-refusal meta-framing with an objective-driven "motivated intruder" persona, while the gate stays the boundary. The reports the operator cites (and the ProjectDiscovery audit above) suggest compliance framing dulls planning; this is a hypothesis, so `ardent-capabilities-spec.md` §4.4 requires an on-vs-off A/B on the same fixtures — including the counter-risk that a model with no authorization context refuses *more* — before the brief changes. The current `src/ardent/prompt.ts` still carries the explicit-authorization wording.
+
 ## Accuracy and creativity work together
 
 Use a flexible loop, not mandatory recon -> scanner -> exploit stages:
@@ -172,7 +348,7 @@ Proposed runtime layout under the actual resolved agent directory:
 
 Authentication state belongs in a separate restricted secrets location, not ordinary artifacts/events/reports. Use references and redacted views. Preserve any necessary raw sensitive evidence with restrictive permissions and explicit retention; do not destroy all useful proof by indiscriminate redaction.
 
-Journal recovery must detect an incomplete final record, schema errors and corruption without silently dropping acknowledged evidence. Surface degraded/read-only mode and prohibit new target activity if required audit writes fail. OS durability and power-loss guarantees must be documented honestly. SQLite is a later alternative if transactional querying/multiple writers justify it; no database provider is required now.
+Journal recovery must detect an incomplete final record, schema errors and corruption without silently dropping acknowledged evidence. Surface degraded/read-only mode and prohibit new *state-changing* target activity if required audit writes fail; read-only target work and local investigation may continue. OS durability and power-loss guarantees must be documented honestly. SQLite is a later alternative if transactional querying/multiple writers justify it; no database provider is required now.
 
 Legacy flat logs cannot reliably identify engagement ownership. Keep an untouched backup; require operator mapping, assign migration IDs, preserve legacy ID aliases, and mark legacy verification as unvalidated until its provenance meets the new contract. Do not merge all old evidence into an arbitrary engagement.
 
@@ -264,7 +440,7 @@ Per-case/per-class success, repeated-trial consistency, time to first supported 
 ### Hard release invariants
 
 - No empty/foreign evidence or model assertion alone qualifies as verified proof.
-- Required persistence/policy failure prohibits new target execution; UI cosmetic failure need not abort domain work.
+- Required persistence/policy failure prohibits new state-changing target execution and any durable-success claim; read-only target work may continue, and UI cosmetic failure need not abort domain work.
 - No silent engagement/identity mixing, implicit scope widening, credential disclosure in ordinary context/report/ad channels, or automatic replay of unknown-completion mutations.
 - Tested negative controls and resource bounds remain intact; discovery does not override operator authorization.
 - Test fixtures and result oracles remain outside agent-controlled files/endpoints. Outcomes, not the agent's final prose, determine success.
@@ -281,7 +457,7 @@ This section refines the first slice into a proposed delivery contract. Names an
 
 ### M1 scope and observable result
 
-An operator starts an explicitly authorized engagement with two supplied fixture accounts. Ardent investigates an ownership boundary, captures the actual requests and responses, records a candidate, and runs a fresh verification with an authorized baseline and discriminating control. It exports a credential-free package. A new process resumes the same engagement, retrieves the same evidence, and retests using newly resolved credentials. The secured variant must not produce a verified finding.
+An operator starts an explicitly authorized engagement with two supplied fixture accounts. Ardent investigates an ownership boundary, captures the actual requests and responses, records a candidate, and runs a fresh verification with an authorized baseline and discriminating control. It exports a credential-free package. A new process resumes the same still-open engagement, retrieves the same evidence, and retests under valid current authorization using newly resolved credentials. If the original engagement has been closed, retest instead creates a linked new engagement; the old journal remains historical evidence. The secured variant must not produce a verified finding.
 
 Do not hardcode the target issue into the investigator prompt or reveal fixture internals. First prove the execution/proof machinery with deterministic scenario drivers, then run the model through the same runtime interface. These are separate tests with separate results.
 
@@ -292,7 +468,7 @@ Keep modules within the existing CLI package and grow only as the slice requires
 - `src/ardent/types.ts`: ownership IDs, lifecycle types, versioned evidence/experiment vocabulary.
 - `src/ardent/evidence.ts`: pure validation and state transitions; no direct mutation by UI or workers.
 - `src/ardent/io.ts`: journal/repository and artifact filesystem adapter, initially using existing Node facilities.
-- `src/ardent/application.ts` (new if needed): engagement/session commands, execution coordination, read projections.
+- `src/ardent/application.ts` (already present, extend incrementally): engagement/session commands, execution coordination, read projections.
 - `src/ardent/http.ts` (new): bounded structured HTTP adapter and captured exchanges.
 - `src/ardent/verification.ts` (new): bounded assertion evaluation and accepted proof rules.
 - `src/ardent/extension.ts`: compatibility tool handlers and lifecycle bindings calling the application; move one operation at a time.
@@ -323,20 +499,20 @@ Proposed operations:
 | propose finding | bounded claim, surface, evidence links | candidate ID; never immediately verified |
 | verify candidate | candidate ID, registered reproduction/control spec | fresh verification attempt and eligible disposition |
 | export package | candidate/finding IDs, destination, redaction policy | validated manifest and referenced files |
-| resume/retest | explicit engagement ID and renewed authorization/identity availability | recovered state and a new run, not replay of unfinished mutations |
+| resume/retest | explicit engagement ID and renewed authorization/identity availability | recovered state and a new run for an open engagement; linked new engagement if closed; never replay unfinished mutations |
 
 Compatibility: retain existing tool names where useful. `ardent_note` without source references is a manual/model note, not automatically runtime evidence. `ardent_finding` rejects empty/foreign references. `ardent_verify` with only `passed` and a prose method returns a structured migration error or an unvalidated claim, never verified status. Reports distinguish legacy, candidate and verified records. Explain intentional behavior changes rather than keeping unsound old test expectations.
 
 ### Lifecycle and recovery rules
 
-- Engagement: `draft -> active -> paused -> closed`. Resume from paused requires valid current authorization; closed engagements remain readable and require an explicit new run authorization before retest, without rewriting historical evidence.
+- Engagement: starts `draft`, may become `active`, can pause/resume under current authorization, and can close from a nonclosed state. Closed engagements remain readable but admit no target work. Retest creates a linked new engagement with renewed authorization, preserving the historical journal.
 - Run: `queued -> running -> terminal`. Terminal outcomes are typed; waiting for approval is observable and budgets specify whether waiting consumes wall time. Defaults count total elapsed wall time, with explicit operator extension if needed.
 - Hypothesis: `proposed -> testing -> supported | refuted | inconclusive`; new evidence may create a new test revision. Avoid destructive overwrites of earlier outcomes.
 - Finding: candidate can gain accepted verification, be refuted, or remain inconclusive. A later failed retest is a new result; classify fixed/stale only with sufficient context, not from timeout alone.
 - Every scheduled network action is authorized and budget-reserved before dispatch. An intent lacking a committed outcome on recovery is `interrupted_unknown`. It must not auto-repeat, especially for mutations. Network failure after sending a request may also have unknown side effects.
 - Pause stops scheduling, cancels active work where feasible, and reports unknown external outcomes. Cancellation is not proof that a remote operation stopped or rolled back.
 - Switch/fork sessions waits for or cancels active owned work under explicit policy. Session forks retain engagement evidence as historical reality; navigating a transcript branch does not undo target changes or erase evidence. New session creation does not silently bind to the previous engagement.
-- Storage failure after an external action prevents further dispatch and marks the run degraded. Preserve available output for explicit recovery/export; never claim the evidence is durable until it is committed.
+- Storage failure after an external action prevents further state-changing dispatch and marks the run degraded; read-only target work may continue. Preserve available output for explicit recovery/export; never claim the evidence is durable until it is committed.
 
 Journal semantics: the committed journal is authoritative; `engagement.json` is a rebuildable manifest/projection, not a second independent truth source. One validated event batch per JSONL record provides command-level replay atomicity. Reserve execution intent separately from outcome. Artifact bytes are finalized before any committed event refers to them. Orphaned files after a crash can be retained for recovery/cleanup, not interpreted as findings.
 
@@ -416,8 +592,8 @@ Export manifest includes schema/build versions, engagement/finding IDs, claim/li
 
 | Package | Depends on | Small reviewable change | Verification before proceeding |
 | --- | --- | --- | --- |
-| P0 | upstream access | fixture protocol and baseline trial capture | reset/readiness, hidden grader, real runtime smoke |
-| P1 | P0 | strict citations, typed outcomes, fail-closed assessment | domain/tool negative tests and existing regression suite |
+| P0 | upstream access | fixture protocol and baseline trial capture | reset/readiness, hidden grader, real runtime smoke (done: `eval/`; remaining: model trials, W03–W16) |
+| P1 | upstream access; P0 supplies quality baseline, not a correctness prerequisite | strict citations, typed outcomes, fail-closed assessment | domain/tool negative tests and existing regression suite |
 | P2 | P1 | ownership IDs, repository journal and artifacts | write faults, replay, concurrency/crash tests |
 | P3 | P2 | session binding and compatibility adapters | real new/resume/switch/fork lifecycle checks |
 | P4 | P2 | scoped captured HTTP and two identities | redirects, encoding, auth isolation, bounds/cancellation |

@@ -3,6 +3,9 @@
 // wiring (parent registers the tool; a child at the depth limit does not, and
 // shares the parent's evidence store).
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { parseArdentConfig } from "../src/ardent/config";
 import { EvidenceStore } from "../src/ardent/evidence";
@@ -59,6 +62,11 @@ function runTool(
   // union, even though the runtime schema accepts every declared role (which
   // test/ardent-roles.test.ts proves against a real session).
   return tool.execute("call-1", params as never, signal, undefined, ctx) as unknown as Promise<ToolResult>;
+}
+
+/** A fresh engagement repository — a test must never touch the real one. */
+function freshEngagementsDir(): string {
+  return mkdtempSync(join(tmpdir(), "ardent-engagements-"));
 }
 
 describe("subagent depth guard", () => {
@@ -271,6 +279,7 @@ function factoryOf(ext: unknown): (pi: ExtensionAPI) => void {
 function createFakePi() {
   const tools: ToolDef[] = [];
   const handlers = new Map<string, Handler[]>();
+  const commands: Array<{ name: string; options?: unknown }> = [];
   const pi = {
     on(event: string, handler: Handler) {
       const list = handlers.get(event) ?? [];
@@ -281,10 +290,30 @@ function createFakePi() {
       tools.push(def);
     },
     registerMessageRenderer() {},
-    registerCommand() {},
+    registerCommand(name: string, options?: unknown) {
+      commands.push({ name, options });
+    },
     appendEntry() {},
   } as unknown as ExtensionAPI;
-  return { pi, tools, handlers };
+  return { pi, tools, handlers, commands };
+}
+
+/**
+ * Start the session and bind it to an engagement. Binding is explicit — the
+ * config only authorizes — so a test meaning "engaged" has to run the same
+ * `/ardent start` an operator would.
+ */
+async function startEngagedSession(fake: ReturnType<typeof createFakePi>) {
+  const sessionCtx = {
+    cwd: "/home/op/engagement",
+    sessionManager: { getSessionId: () => "subagent-session" },
+    ui: { notify: () => {} },
+  } as unknown as ExtensionContext;
+  await fake.handlers.get("session_start")![0]!({}, sessionCtx);
+  const ardent = fake.commands.find((c) => c.name === "ardent")?.options as {
+    handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
+  };
+  await ardent.handler("start", sessionCtx);
 }
 
 function makeState(config = engagedConfig): ArdentSessionState {
@@ -295,6 +324,7 @@ describe("Ardent extension subagent wiring", () => {
   test("the parent registers spawn_agent only when a runner is configured", () => {
     const r = runner();
     const withRunner = createArdentExtension({
+      engagementsDir: freshEngagementsDir(),
       loadConfig: () => engagedConfig,
       subagent: { depth: 0, maxDepth: 1, createRunner: () => r.runner },
     });
@@ -302,7 +332,7 @@ describe("Ardent extension subagent wiring", () => {
     factoryOf(withRunner)(fake.pi);
     expect(fake.tools.map((t) => t.name)).toContain(ARDENT_SUBAGENT_TOOL);
 
-    const without = createArdentExtension({ loadConfig: () => engagedConfig });
+    const without = createArdentExtension({ engagementsDir: freshEngagementsDir(), loadConfig: () => engagedConfig });
     const bare = createFakePi();
     factoryOf(without)(bare.pi);
     expect(bare.tools.map((t) => t.name)).not.toContain(ARDENT_SUBAGENT_TOOL);
@@ -310,7 +340,7 @@ describe("Ardent extension subagent wiring", () => {
 
   test("a child at the depth limit registers the evidence tools but not spawn_agent", () => {
     const state = makeState();
-    const child = createArdentChildExtension(state, { depth: 1, maxDepth: 1, createRunner: () => runner().runner });
+    const child = createArdentChildExtension(state, { engagementsDir: freshEngagementsDir(), depth: 1, maxDepth: 1, createRunner: () => runner().runner });
     const fake = createFakePi();
     factoryOf(child)(fake.pi);
     const names = fake.tools.map((t) => t.name);
@@ -322,23 +352,31 @@ describe("Ardent extension subagent wiring", () => {
 
   test("a child below the limit can spawn, with its own nested depth", () => {
     const state = makeState();
-    const child = createArdentChildExtension(state, { depth: 1, maxDepth: 2, createRunner: () => runner().runner });
+    const child = createArdentChildExtension(state, { engagementsDir: freshEngagementsDir(), depth: 1, maxDepth: 2, createRunner: () => runner().runner });
     const fake = createFakePi();
     factoryOf(child)(fake.pi);
     expect(fake.tools.map((t) => t.name)).toContain(ARDENT_SUBAGENT_TOOL);
   });
 
-  test("a child shares the parent's evidence store", async () => {
+  test("a child's evidence lands in the bound engagement's own log, not a shared store", async () => {
     const state = makeState();
-    const child = createArdentChildExtension(state, { depth: 1, maxDepth: 1 });
+    const child = createArdentChildExtension(state, { engagementsDir: freshEngagementsDir(), depth: 1, maxDepth: 1 });
     const fake = createFakePi();
     factoryOf(child)(fake.pi);
+    await startEngagedSession(fake);
     const note = fake.tools.find((t) => t.name === "ardent_note")!;
-    await note.execute("call-1", { summary: "child observed 443 open", target: "10.0.0.5" }, undefined, undefined, {
+    const recorded = (await note.execute("call-1", { summary: "child observed 443 open", target: "10.0.0.5" }, undefined, undefined, {
       cwd: "/tmp",
       ui: { notify: () => {} },
-    });
-    expect(state.evidence.observations).toHaveLength(1);
-    expect(state.evidence.observations[0]!.summary).toContain("443 open");
+    })) as { details: { ok?: boolean } };
+    expect(recorded.details.ok).not.toBe(false);
+
+    // Evidence is owned by the engagement the child is bound to — by path.
+    const engagement = state.store!.engagementForSession("subagent-session")!;
+    const owned = state.store!.evidenceFor(engagement.id);
+    expect(owned.observations).toHaveLength(1);
+    expect(owned.observations[0]!.summary).toContain("443 open");
+    // The process-local fallback store is not an evidence destination.
+    expect(state.evidence.observations).toHaveLength(0);
   });
 });

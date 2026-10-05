@@ -46,10 +46,16 @@ function createFakePi() {
   return { pi, handlers, tools, commands, commandDefs, entries, sendMessages };
 }
 
-function makeCtx(overrides: Partial<{ cwd: string; hasUI: boolean; confirm: () => Promise<boolean> }> = {}) {
+function makeCtx(
+  overrides: Partial<{ cwd: string; hasUI: boolean; confirm: () => Promise<boolean>; sessionId: string }> = {},
+) {
+  const sessionId = overrides.sessionId ?? "sess-1";
   return {
     cwd: overrides.cwd ?? "/home/op/engagement",
     hasUI: overrides.hasUI ?? false,
+    // Bindings are per session id, and pi hands the extension its id through
+    // the session manager — this is how a test says "a different session".
+    sessionManager: { getSessionId: () => sessionId },
     ui: {
       confirm: overrides.confirm ?? (async () => true),
       notify: () => {},
@@ -60,11 +66,64 @@ function makeCtx(overrides: Partial<{ cwd: string; hasUI: boolean; confirm: () =
 
 const engagedConfig = parseArdentConfig({ enabled: true, label: "acme", targets: ["10.0.0.0/24"] })!;
 
-function build(loadConfig: () => ReturnType<typeof parseArdentConfig>) {
-  const ext = createArdentExtension({ loadConfig }) as { name: string; factory: (pi: ExtensionAPI) => void };
+type Harness = ReturnType<typeof build>;
+
+function build(
+  loadConfig: () => ReturnType<typeof parseArdentConfig>,
+  overrides: Partial<Parameters<typeof createArdentExtension>[0]> = {},
+) {
+  const ext = createArdentExtension({
+    engagementsDir: freshEngagementsDir(),
+    loadConfig,
+    ...overrides,
+  }) as { name: string; factory: (pi: ExtensionAPI) => void };
   const fake = createFakePi();
   ext.factory(fake.pi);
   return { ext, ...fake };
+}
+
+type CommandHost = Pick<Harness, "commandDefs">;
+
+/**
+ * Run a `/ardent` subcommand the way pi would, and collect the messages it
+ * reported — the command's only output is operator-facing text, so tests
+ * assert on exactly what an operator would read.
+ */
+async function ardent(harness: CommandHost, args = "", ctx = makeCtx()): Promise<string[]> {
+  const messages: string[] = [];
+  const base = ctx as unknown as { ui: Record<string, unknown> };
+  const recording = {
+    ...ctx,
+    ui: {
+      ...base.ui,
+      notify: (message: string) => {
+        messages.push(message);
+      },
+    },
+  } as unknown as ExtensionContext;
+  const def = harness.commandDefs.find((c) => c.name === "ardent")?.options as {
+    handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
+  };
+  await def.handler(args, recording);
+  return messages;
+}
+
+/**
+ * Configuration no longer engages anything by itself: it supplies the
+ * *authorization*, and `/ardent start` supplies the engagement. A test that
+ * means "engaged" says so by starting one, exactly as an operator would.
+ */
+async function startEngagement(
+  harness: CommandHost,
+  objective = "",
+  ctx = makeCtx(),
+): Promise<string[]> {
+  return ardent(harness, objective === "" ? "start" : `start ${objective}`, ctx);
+}
+
+/** A fresh engagement repository — a test must never touch the real one. */
+function freshEngagementsDir(): string {
+  return mkdtempSync(join(tmpdir(), "ardent-engagements-"));
 }
 
 describe("free-pi-ardent extension", () => {
@@ -73,7 +132,6 @@ describe("free-pi-ardent extension", () => {
     expect(ext.name).toBe("free-pi-ardent");
     expect([...handlers.keys()].sort()).toEqual([
       "agent_end",
-      "agent_settled",
       "agent_start",
       "before_agent_start",
       "context",
@@ -91,6 +149,7 @@ describe("free-pi-ardent extension", () => {
       "ardent_finding",
       "ardent_link",
       "ardent_note",
+      "ardent_request",
       "ardent_screenshot",
       "ardent_verify",
     ]);
@@ -231,8 +290,9 @@ describe("free-pi-ardent extension", () => {
   });
 
   test("blocks out-of-scope egress when engaged", async () => {
-    const { handlers } = build(() => engagedConfig);
+    const { commandDefs, handlers } = build(() => engagedConfig);
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const result = (await handlers.get("tool_call")![0]!(
       { toolName: "bash", input: { command: "nmap 8.8.8.8" } },
       makeCtx(),
@@ -241,8 +301,9 @@ describe("free-pi-ardent extension", () => {
   });
 
   test("allows in-scope egress when engaged", async () => {
-    const { handlers } = build(() => engagedConfig);
+    const { commandDefs, handlers } = build(() => engagedConfig);
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const result = await handlers.get("tool_call")![0]!(
       { toolName: "bash", input: { command: "nmap 10.0.0.5" } },
       makeCtx(),
@@ -251,8 +312,9 @@ describe("free-pi-ardent extension", () => {
   });
 
   test("injects the engagement brief once engaged", async () => {
-    const { handlers } = build(() => engagedConfig);
+    const { commandDefs, handlers } = build(() => engagedConfig);
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const result = (await handlers.get("before_agent_start")![0]!({}, makeCtx())) as {
       message?: { customType?: string; content?: string };
     };
@@ -262,8 +324,9 @@ describe("free-pi-ardent extension", () => {
   });
 
   test("ardent_note records an observation and persists memory", async () => {
-    const { handlers, tools, entries } = build(() => engagedConfig);
+    const { commandDefs, handlers, tools, entries } = build(() => engagedConfig);
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const note = tools.find((t) => t.name === "ardent_note")!;
     const result = (await note.execute("call-1", { summary: "port 22 open", target: "10.0.0.5" }, undefined, undefined, makeCtx())) as {
       content: Array<{ text: string }>;
@@ -273,8 +336,9 @@ describe("free-pi-ardent extension", () => {
   });
 
   test("ardent_finding rejects evidence-free findings", async () => {
-    const { handlers, tools } = build(() => engagedConfig);
+    const { commandDefs, handlers, tools } = build(() => engagedConfig);
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const finding = tools.find((t) => t.name === "ardent_finding")!;
     const result = (await finding.execute(
       "call-2",
@@ -293,8 +357,9 @@ describe("free-pi-ardent extension", () => {
   });
 
   test("fails closed when the gate itself cannot be evaluated", async () => {
-    const { handlers } = build(() => engagedConfig);
+    const { commandDefs, handlers } = build(() => engagedConfig);
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const result = (await handlers.get("tool_call")![0]!(
       {
         get toolName(): string {
@@ -312,8 +377,9 @@ describe("free-pi-ardent extension", () => {
   });
 
   test("ardent_finding refuses a citation-less claim with a typed code", async () => {
-    const { handlers, tools } = build(() => engagedConfig);
+    const { commandDefs, handlers, tools } = build(() => engagedConfig);
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const finding = tools.find((t) => t.name === "ardent_finding")!;
     const result = (await finding.execute(
       "call-citation",
@@ -327,9 +393,13 @@ describe("free-pi-ardent extension", () => {
     expect(result.content[0]!.text).toContain("Rejected");
   });
 
-  test("ardent_verify records an unproofed claim as unvalidated, then promotes on proof", async () => {
-    const { handlers, tools } = build(() => engagedConfig);
+  test("ardent_verify records a bare claim as unvalidated and never promotes on a model note", async () => {
+    const { commandDefs, handlers, tools } = build(() => engagedConfig, {
+      screenshotDir: mkdtempSync(join(tmpdir(), "ardent-shots-")),
+      capture: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3]) }),
+    });
     await handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement({ commandDefs });
     const note = tools.find((t) => t.name === "ardent_note")!;
     const observed = (await note.execute(
       "call-note",
@@ -369,8 +439,11 @@ describe("free-pi-ardent extension", () => {
     expect(claimed.details.promoted).toBe(false);
     expect(claimed.details.status).toBe("candidate");
 
-    const proven = (await verify.execute(
-      "call-verify-proven",
+    // The same claim with a citation is still the model's word: the note came
+    // from ardent_note, so it is model-authored proof, and a model-authored
+    // record cannot carry a verdict (plan checkpoint 4).
+    const cited = (await verify.execute(
+      "call-verify-cited",
       {
         finding_id: created.details.finding_id,
         passed: true,
@@ -380,10 +453,40 @@ describe("free-pi-ardent extension", () => {
       undefined,
       undefined,
       makeCtx(),
-    )) as { details: { outcome?: string; promoted?: boolean; status?: string } };
-    expect(proven.details.outcome).toBe("supported");
-    expect(proven.details.promoted).toBe(true);
-    expect(proven.details.status).toBe("verified");
+    )) as {
+      content: Array<{ text: string }>;
+      details: { outcome?: string; promoted?: boolean; status?: string };
+    };
+    expect(cited.details.outcome).toBe("unvalidated");
+    expect(cited.details.promoted).toBe(false);
+    expect(cited.details.status).toBe("candidate");
+    expect(cited.content[0]!.text).toContain("unvalidated");
+    expect(cited.content[0]!.text).toContain("harness-captured");
+
+    // A screenshot is captured by the harness but still cannot verify: it
+    // shows what rendered, not what executed.
+    const shot = tools.find((t) => t.name === "ardent_screenshot")!;
+    const captured = (await shot.execute(
+      "call-shot",
+      { url: "http://10.0.0.5/admin", description: "admin page painted" },
+      undefined,
+      undefined,
+      makeCtx(),
+    )) as { details: { artifact_id?: string } };
+    const withShot = (await verify.execute(
+      "call-verify-shot",
+      {
+        finding_id: created.details.finding_id,
+        passed: true,
+        method: "the page painted the marker",
+        proof_artifact_ids: [captured.details.artifact_id!],
+      },
+      undefined,
+      undefined,
+      makeCtx(),
+    )) as { content: Array<{ text: string }>; details: { outcome?: string; code?: string } };
+    expect(withShot.details.outcome).toBeUndefined();
+    expect(withShot.details.code).toBe("validation");
   });
 
   test("announces nothing at session start — the HUD strip is the only scope surface", async () => {
@@ -405,10 +508,12 @@ describe("free-pi-ardent extension", () => {
 
     const engagedRun = build(() => engagedConfig);
     await engagedRun.handlers.get("session_start")![0]!({}, tuiCtx);
+    await startEngagement(engagedRun);
     expect(notices).toHaveLength(0);
 
     // A subagent child stays silent too.
     const child = createArdentExtension({
+      engagementsDir: freshEngagementsDir(),
       loadConfig: () => engagedConfig,
       state: { config: engagedConfig, memory: emptyWorkingMemory(), evidence: new EvidenceStore() },
     }) as { factory: (pi: ExtensionAPI) => void };
@@ -448,6 +553,7 @@ describe("free-pi-ardent extension", () => {
     const dir = mkdtempSync(join(tmpdir(), "ardent-shots-"));
     const seen: Array<{ url: string; outputPath: string }> = [];
     const ext = createArdentExtension({
+      engagementsDir: freshEngagementsDir(),
       loadConfig: () => engagedConfig,
       screenshotDir: dir,
       capture: async (req) => {
@@ -458,6 +564,7 @@ describe("free-pi-ardent extension", () => {
     const fake = createFakePi();
     ext.factory(fake.pi);
     await fake.handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement(fake);
 
     const tool = fake.tools.find((t) => t.name === "ardent_screenshot")!;
     const result = (await tool.execute(
@@ -486,6 +593,7 @@ describe("free-pi-ardent extension", () => {
   test("ardent_screenshot refuses a URL outside the engagement scope", async () => {
     let captured = 0;
     const ext = createArdentExtension({
+      engagementsDir: freshEngagementsDir(),
       loadConfig: () => engagedConfig,
       screenshotDir: mkdtempSync(join(tmpdir(), "ardent-shots-")),
       capture: async () => {
@@ -496,6 +604,7 @@ describe("free-pi-ardent extension", () => {
     const fake = createFakePi();
     ext.factory(fake.pi);
     await fake.handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement(fake);
     const tool = fake.tools.find((t) => t.name === "ardent_screenshot")!;
     const result = (await tool.execute(
       "call-shot",
@@ -511,12 +620,14 @@ describe("free-pi-ardent extension", () => {
 
   test("ardent_screenshot rejects non-http schemes and a missing browser", async () => {
     const ext = createArdentExtension({
+      engagementsDir: freshEngagementsDir(),
       loadConfig: () => engagedConfig,
       screenshotDir: mkdtempSync(join(tmpdir(), "ardent-shots-")),
     }) as { factory: (pi: ExtensionAPI) => void };
     const fake = createFakePi();
     ext.factory(fake.pi);
     await fake.handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement(fake);
     const tool = fake.tools.find((t) => t.name === "ardent_screenshot")!;
 
     const fileUrl = (await tool.execute(
@@ -552,72 +663,10 @@ describe("free-pi-ardent extension", () => {
     }
   });
 
-  test("recovers once from a refusal-shaped reply, then stops nagging", async () => {
-    const { handlers, sendMessages, entries } = build(() => engagedConfig);
-    await handlers.get("session_start")![0]!({}, makeCtx());
-    const settle = handlers.get("agent_settled")![0]!;
-    const end = handlers.get("agent_end")![0]!;
-    const refusal = {
-      messages: [{ role: "assistant", content: [{ type: "text", text: "I can't help with that." }] }],
-    };
-
-    end(refusal, makeCtx());
-    settle({}, makeCtx());
-    expect(sendMessages).toHaveLength(1);
-    expect(sendMessages[0]!.message.customType).toBe("ardent-recovery");
-    // The nudge must actually continue the conversation, not just record intent.
-    expect(sendMessages[0]!.options?.triggerTurn).toBe(true);
-    // Visible in the transcript, so the operator can see a nudge happened.
-    expect(sendMessages[0]!.message.display).toBe(true);
-    expect(entries.some((e) => e.type === "ardent-recovery")).toBe(true);
-
-    // A second settle with no new user objective must not nag again.
-    end(refusal, makeCtx());
-    settle({}, makeCtx());
-    expect(sendMessages).toHaveLength(1);
-  });
-
-  test("a new user objective resets the recovery budget", async () => {
-    const { handlers, sendMessages } = build(() => engagedConfig);
-    await handlers.get("session_start")![0]!({}, makeCtx());
-    const refusal = {
-      messages: [{ role: "assistant", content: [{ type: "text", text: "I'm unable to assist with that." }] }],
-    };
-    handlers.get("agent_end")![0]!(refusal, makeCtx());
-    handlers.get("agent_settled")![0]!({}, makeCtx());
-    expect(sendMessages).toHaveLength(1);
-
-    // The user speaks again → a fresh objective → a fresh budget.
-    handlers.get("before_agent_start")![0]!({}, makeCtx());
-    handlers.get("agent_end")![0]!(refusal, makeCtx());
-    handlers.get("agent_settled")![0]!({}, makeCtx());
-    expect(sendMessages).toHaveLength(2);
-  });
-
-  test("does not recover when the engagement is off or the reply is normal", async () => {
-    const off = build(() => undefined);
-    await off.handlers.get("session_start")![0]!({}, makeCtx());
-    off.handlers.get("agent_end")![0]!(
-      { messages: [{ role: "assistant", content: "I can't help with that." }] },
-      makeCtx(),
-    );
-    off.handlers.get("agent_settled")![0]!({}, makeCtx());
-    expect(off.sendMessages).toHaveLength(0);
-
-    const on = build(() => engagedConfig);
-    await on.handlers.get("session_start")![0]!({}, makeCtx());
-    // Third-person report language is not a refusal (the detector's whole point).
-    on.handlers.get("agent_end")![0]!(
-      { messages: [{ role: "assistant", content: "Mapped 10.0.0.5; connection refused on 22." }] },
-      makeCtx(),
-    );
-    on.handlers.get("agent_settled")![0]!({}, makeCtx());
-    expect(on.sendMessages).toHaveLength(0);
-  });
-
   test("spawn_agent runs without an engagement; the runner is reached", async () => {
     let calls = 0;
     const ext = createArdentExtension({
+      engagementsDir: freshEngagementsDir(),
       loadConfig: () => undefined,
       subagent: {
         depth: 0,
@@ -657,12 +706,14 @@ describe("free-pi-ardent extension — read-only mode", () => {
   async function buildDegraded() {
     const evidence = failingEvidence();
     const ext = createArdentExtension({
+      engagementsDir: freshEngagementsDir(),
       loadConfig: () => engagedConfig,
       evidence,
     }) as { factory: (pi: ExtensionAPI) => void };
     const fake = createFakePi();
     ext.factory(fake.pi);
     await fake.handlers.get("session_start")![0]!({}, makeCtx());
+    await startEngagement(fake);
     // The write that fails is what flips the store: degraded for the rest of
     // the run, because the failed record never reached the file.
     evidence.addObservation({ source: "nmap", summary: "port 22 open", target: "10.0.0.5" });
@@ -671,21 +722,21 @@ describe("free-pi-ardent extension — read-only mode", () => {
     return { evidence, ...fake };
   }
 
-  test("the gate stops target execution once a durable write has failed", async () => {
+  test("the gate stops state-changing target execution once a durable write has failed", async () => {
     const { handlers } = await buildDegraded();
     const result = (await handlers.get("tool_call")![0]!(
-      { toolName: "bash", input: { command: "nmap 10.0.0.5" } },
+      { toolName: "bash", input: { command: "curl -X POST http://10.0.0.5/api/transfer" } },
       makeCtx(),
     )) as { block?: boolean; reason?: string } | undefined;
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain("persistence failure");
-    expect(result?.reason).toContain("audit writes");
-    // In-scope is no longer the point: nothing new reaches the target while
+    expect(result?.reason).toContain("state-changing");
+    // In-scope is no longer the point: nothing new changes the target while
     // the record cannot be kept.
     expect(result?.reason).not.toContain("outside engagement scope");
   });
 
-  test("local work keeps running — degraded, not dead", async () => {
+  test("local work and read-only target work keep running — degraded, not dead", async () => {
     const { handlers } = await buildDegraded();
     const read = await handlers.get("tool_call")![0]!(
       { toolName: "read", input: { path: "notes/report.md" } },
@@ -697,6 +748,13 @@ describe("free-pi-ardent extension — read-only mode", () => {
       makeCtx(),
     );
     expect(write).toBeUndefined();
+    // Observation cannot create an unrecorded mutation, so a read-only target
+    // request is still allowed while the audit store is degraded.
+    const observe = await handlers.get("tool_call")![0]!(
+      { toolName: "bash", input: { command: "curl http://10.0.0.5/status" } },
+      makeCtx(),
+    );
+    expect(observe).toBeUndefined();
   });
 
   test("evidence tools refuse with a typed storage code and record nothing", async () => {

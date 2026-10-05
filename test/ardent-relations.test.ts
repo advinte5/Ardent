@@ -25,7 +25,10 @@ interface Fixture {
 /** A store seeded with one observation and `n` candidate findings. */
 function storeWith(n: number, severities?: readonly Severity[]): Fixture {
   const store = new EvidenceStore({ now: () => 1_000 });
-  store.addObservation({ source: "test", summary: "seed" });
+  // `runtime`: these tests are about chains and verification counts, so the
+  // seed stands for a record the harness captured. A model-authored note could
+  // not carry the verifications below (see evidence.test.ts).
+  store.addObservation({ source: "test", summary: "seed", origin: "runtime" });
   const ids: string[] = [];
   for (let i = 0; i < n; i++) {
     const result = store.addFinding({
@@ -55,7 +58,7 @@ describe("addRelation validation", () => {
   test("records a valid relation and emits it", () => {
     const emitted: unknown[] = [];
     const store = new EvidenceStore({ now: () => 42, persist: (r) => emitted.push(r) });
-    store.addObservation({ source: "t", summary: "s" });
+    store.addObservation({ source: "t", summary: "s", origin: "runtime" });
     const a = store.addFinding({ title: "a", severity: "low", confidence: 0.5, target: "h", description: "d", observationIds: ["obs-1"] });
     const b = store.addFinding({ title: "b", severity: "high", confidence: 0.5, target: "h", description: "d", observationIds: ["obs-1"] });
 
@@ -74,12 +77,16 @@ describe("addRelation validation", () => {
 
   test("refuses unknown endpoints", () => {
     const { store, ids } = storeWith(2);
-    expect(store.addRelation({ from: ids[0]!, to: "find-does-not-exist", kind: "enables" })).toEqual({
+    const unknownTarget = store.addRelation({ from: ids[0]!, to: "find-does-not-exist", kind: "enables" });
+    expect(unknownTarget).toMatchObject({
       ok: false,
+      code: "foreign_reference",
       error: "unknown finding id: find-does-not-exist",
     });
-    expect(store.addRelation({ from: "find-does-not-exist", to: ids[0]!, kind: "enables" })).toEqual({
+    const unknownSource = store.addRelation({ from: "find-does-not-exist", to: ids[0]!, kind: "enables" });
+    expect(unknownSource).toMatchObject({
       ok: false,
+      code: "foreign_reference",
       error: "unknown finding id: find-does-not-exist",
     });
     expect(store.relations).toHaveLength(0);
@@ -87,8 +94,9 @@ describe("addRelation validation", () => {
 
   test("refuses a self-relation", () => {
     const { store, ids } = storeWith(1);
-    expect(store.addRelation({ from: ids[0]!, to: ids[0]!, kind: "enables" })).toEqual({
+    expect(store.addRelation({ from: ids[0]!, to: ids[0]!, kind: "enables" })).toMatchObject({
       ok: false,
+      code: "validation",
       error: "a finding cannot bear on itself",
     });
     expect(store.relations).toHaveLength(0);

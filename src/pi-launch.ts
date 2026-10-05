@@ -33,8 +33,8 @@ import { toolsForRole } from "./ardent/roles";
 import { DEFAULT_MAX_SUBAGENT_DEPTH, canSpawnFrom, type SubagentRunner } from "./ardent/subagent";
 import { createArdentSubagentRunner } from "./ardent/subagent-runtime";
 import { normalizeConcurrencyLimit } from "./ardent/concurrency";
-import { loadArdentConfigFromFile, createJsonlEvidenceSink } from "./ardent/io";
-import { getArdentConfigPath, getArdentEvidencePath } from "./paths";
+import { loadArdentConfigFromFile } from "./ardent/io";
+import { getArdentConfigPath, getArdentEngagementsDir } from "./paths";
 import { CLI_VERSION } from "./version";
 
 export interface LaunchOptions {
@@ -224,14 +224,19 @@ export function buildRuntimeOptions(opts: LaunchOptions, sessionId: string): Run
           maxConcurrent: maxConcurrentSubagents,
           createRunner: buildSubagentRunner,
           role,
+          engagementsDir: ardentEngagementsDir,
         }),
       ],
     });
 
   const ardentConfigPath = getArdentConfigPath(opts.agentDir);
+  // One repository for every engagement, one subdirectory per engagement
+  // (the plan's layout). Explicit here so the child extensions point at the
+  // same tree as the parent instead of falling back to a default.
+  const ardentEngagementsDir = getArdentEngagementsDir(opts.agentDir);
   const ardentExtension: InlineExtension = createArdentExtension({
     loadConfig: () => loadArdentConfigFromFile(ardentConfigPath),
-    persistEvidence: createJsonlEvidenceSink(getArdentEvidencePath(opts.agentDir)),
+    engagementsDir: ardentEngagementsDir,
     subagent: {
       depth: 0,
       maxDepth: maxSubagentDepth,

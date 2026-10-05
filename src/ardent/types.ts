@@ -58,6 +58,26 @@ export interface Scope {
   label?: string;
 }
 
+/**
+ * Where a record's bytes came from — the provenance class that decides
+ * whether it can carry a verification.
+ *
+ *   runtime  the harness recorded this itself, from an execution or capture it
+ *            performed: bytes it observed on the wire, output it received.
+ *   model    a model-authored assertion. Real, useful, and citable — but it is
+ *            the model's prose, so it cannot stand in for a source execution.
+ *
+ * Fail-closed default: anything that does not say `runtime` is `model`. A
+ * record missing the field (or written before the field existed) can therefore
+ * never be promoted to proof by a missing value.
+ */
+export type RecordOrigin = "runtime" | "model";
+
+/** True when a record is a harness capture rather than a model assertion. */
+export function isRuntimeOrigin(record: { origin?: RecordOrigin }): boolean {
+  return record.origin === "runtime";
+}
+
 /** A raw, unvalidated data point from the environment or a tool. */
 export interface Observation {
   id: string;
@@ -67,6 +87,12 @@ export interface Observation {
   /** Host/IP the observation is about, when it has one. */
   target?: string;
   summary: string;
+  /**
+   * Who wrote this down. Absent means `model`: an observation recorded through
+   * `ardent_note` is the model's summary of what it saw, not a capture the
+   * harness made, and only the latter can carry a verification.
+   */
+  origin?: RecordOrigin;
   /** Optional raw detail (command output, response line, etc.). */
   raw?: string;
 }
@@ -97,6 +123,12 @@ export interface Artifact {
    * `file`.
    */
   kind?: ArtifactKind;
+  /**
+   * Who produced the bytes. Absent means `model`: a row the model asserted
+   * about a path it named. Only `runtime` artifacts written by the capture
+   * path (and not screenshots) can carry a verification.
+   */
+  origin?: RecordOrigin;
   /** Host/IP the artifact is about, when it has one. */
   target?: string;
   description: string;
@@ -262,6 +294,14 @@ export interface Engagement {
   authorizationRef: string;
   /** Approved scope at the time of creation. */
   scope: Scope;
+  /**
+   * sha256 of the normalized scope + authorization reference, frozen when the
+   * engagement was created. It is how a later config edit is DETECTED as drift
+   * rather than silently adopted: the engagement keeps the authority it was
+   * started with, and a changed config is a new engagement, not a mutation of
+   * this one. Absent on engagements created before this field existed.
+   */
+  authorizationDigest?: string;
   lifecycle: EngagementLifecycle;
   /** Optimistic-concurrency counter; bumped by every committed command. */
   revision: number;
@@ -284,6 +324,8 @@ export type ErrorCode =
   | "foreign_reference"
   | "revision_conflict"
   | "scope_denied"
+  /** Session↔engagement binding is explicit; this session holds none. */
+  | "not_bound"
   | "approval_required"
   | "identity_unavailable"
   | "budget_exhausted"

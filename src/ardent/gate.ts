@@ -28,9 +28,14 @@ export interface GateInput {
   /** Workspace root; writes resolving outside it are confirmed. */
   cwd: string;
   /**
-   * True when a required audit write has failed (`EvidenceStore.degraded`).
-   * The engagement is then read-only: see rule 0 in `evaluateAction`.
+   * Why this session may not execute on a target *at all*, set when a scope is
+   * configured but there is no live authorization behind it: the session holds
+   * no engagement (bindings are explicit), or the engagement store cannot be
+   * opened. The exact sentence is reported as the block reason, so the
+   * operator reads the real cause instead of a scope verdict we did not reach.
    */
+  engagementUnavailable?: string;
+  /** True when a required audit write has failed (`EvidenceStore.degraded`). */
   persistenceDegraded?: boolean;
 }
 
@@ -55,6 +60,20 @@ const ELEVATION_PATTERNS: ReadonlyArray<{ re: RegExp; reason: string }> = [
 
 /** Tools whose arguments can name a network target. */
 const EGRESS_HINT_RE = /\b(curl|wget|nc|ncat|netcat|ssh|scp|sftp|nmap|masscan|ffuf|gobuster|nikto|sqlmap|hydra|ping|dig|host|nslookup|socat|telnet)\b/i;
+
+/** HTTP methods that do not change server state. */
+const READ_ONLY_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+
+/**
+ * Indicators that a shell action changes target state. Deliberately a small,
+ * positive list: under the read-only rule an unrecognized action is treated as
+ * read-only, and the alternative — treating everything as state-changing — is
+ * the blanket block this rule exists to remove. Anything destructive is still
+ * caught by the scope-independent rules below.
+ */
+const MUTATING_METHOD_RE = /(?:-X|--request)\s*['"]?(POST|PUT|PATCH|DELETE)\b/i;
+const MUTATING_BODY_RE = /(^|\s)(-d|--data(?:-raw|-binary|-urlencode|-ascii)?|-F|--form|-T|--upload-file|--json)\b/i;
+const MUTATING_TOOL_RE = /\b(sqlmap|hydra|medusa|mysql|psql|redis-cli|mongosh)\b/i;
 
 /**
  * Best-effort "is this a write?" for tools with path-ish arguments.
@@ -82,6 +101,46 @@ function outboundDestinations(input: Record<string, unknown>): string[] {
     if (typeof value === "string" && value.trim() !== "") destinations.push(value.trim());
   }
   return destinations;
+}
+
+/**
+ * Whether an action is expected to change *target* state, used only by the
+ * read-only rule (a failed audit write blocks changes, not observation). A
+ * shell command is judged by explicit method/body/upload flags and known
+ * mutating tools; a structured tool is judged by its declared `method`, and a
+ * target-naming tool that declares no method is treated as state-changing so a
+ * future adapter cannot slip a mutation past the rule by omission. Read-only
+ * HTTP therefore goes through the structured adapter (which sets the method)
+ * or a flagless `curl`/`wget` GET.
+ */
+function isStateChanging(input: GateInput, command: string): boolean {
+  if (command !== "") {
+    return (
+      MUTATING_METHOD_RE.test(command) || MUTATING_BODY_RE.test(command) || MUTATING_TOOL_RE.test(command)
+    );
+  }
+  const method =
+    typeof input.input.method === "string" && input.input.method.trim() !== ""
+      ? input.input.method.trim().toUpperCase()
+      : undefined;
+  if (method !== undefined) return !READ_ONLY_METHODS.has(method);
+  return outboundDestinations(input.input).length > 0;
+}
+
+/**
+ * What could reach out from a call, for the two rules that are preconditions
+ * of dispatch rather than classifications of it — no live authorization, and
+ * a failed durable write. A shell command reaches a target however it is
+ * worded, so every shell call counts; anything else must name a destination.
+ *
+ * The targets come back with the verdict so the audit line says what was
+ * stopped rather than only why.
+ */
+function targetReach(input: GateInput, command: string): { reaches: boolean; targets: string[] } {
+  const text = command === "" ? outboundDestinations(input.input).join(" ") : command;
+  const targets = extractTargets(text);
+  const reaches = input.toolName === "bash" || targets.length > 0 || EGRESS_HINT_RE.test(text);
+  return { reaches, targets };
 }
 
 function isOutsideCwd(targetPath: string, cwd: string): boolean {
@@ -134,40 +193,43 @@ function evaluateAction(input: GateInput): ActionAssessment {
       ? (input.input.command as string)
       : "";
 
-  // 0. Persistence failure. The hard release invariant: a required audit
-  //    write that failed prohibits new target execution. If this engagement
-  //    cannot record what happened, it does not get to make more things
-  //    happen on a target — an action whose outcome cannot be committed is
-  //    indistinguishable from one that never ran, and evaluation case W16
-  //    requires the run to stop rather than to claim a durable success.
-  //
-  //    This runs before everything else on purpose: it is a precondition of
-  //    dispatch, not a classification of the action, and blocking on it is
-  //    never less strict than any verdict below. Local read/write work is
-  //    untouched — degraded, not dead.
-  if (input.persistenceDegraded) {
-    // What could reach out: the whole command for a shell (however it is
-    // worded), the named destination for anything else. Targets go back on
-    // the assessment so the audit line says what was stopped.
-    const text = toolName === "bash" ? command : outboundDestinations(input.input).join(" ");
-    const targets = extractTargets(text);
-    const reachesTarget = toolName === "bash" || targets.length > 0 || EGRESS_HINT_RE.test(text);
-    if (reachesTarget) {
-      return {
-        action: "block",
-        reason:
-          "persistence failure: audit writes are failing, so new target execution is prohibited until the store is durable again",
-        targets,
-      };
+  // 0. No live authorization. A scope can be configured while this session
+  //    holds no engagement — bindings are explicit, so a session never
+  //    inherits one — or while the engagement store cannot be opened at all.
+  //    With no engagement there is nothing to authorize action against a
+  //    target, so target-capable calls stop here and the reason we give is
+  //    the real one, not a scope verdict we did not reach. Local read/write
+  //    work is unaffected: an unbound session may still read the workspace.
+  if (input.engagementUnavailable !== undefined) {
+    const reach = targetReach(input, command);
+    if (reach.reaches) {
+      return { action: "block", reason: input.engagementUnavailable, targets: reach.targets };
     }
   }
 
-  // 1. Destructive, scope-independent.
+  // 1. Persistence failure. A required audit write that failed prohibits new
+  //    *state-changing* target execution: an action whose outcome cannot be
+  //    committed is indistinguishable from one that never ran, so it is not
+  //    allowed to change target state (evaluation case W16). Read-only target
+  //    work and local investigation continue, because observation cannot
+  //    create an unrecorded mutation: degraded, not dead means the engagement
+  //    can still look and think, it just may not act.
+  if (input.persistenceDegraded && isStateChanging(input, command)) {
+    const reach = targetReach(input, command);
+    return {
+      action: "block",
+      reason:
+        "persistence failure: audit writes are failing, so new state-changing target execution is prohibited until the store is durable again",
+      targets: reach.targets,
+    };
+  }
+
+  // 2. Destructive, scope-independent.
   for (const { re, reason } of DESTRUCTIVE_PATTERNS) {
     if (re.test(command)) return { action: "block", reason: `destructive: ${reason}`, targets: [] };
   }
 
-  // 2. Privilege / credential access.
+  // 3. Privilege / credential access.
   for (const { re, reason } of ELEVATION_PATTERNS) {
     if (re.test(command)) return { action: "confirm", reason: `sensitive: ${reason}`, targets: [] };
   }

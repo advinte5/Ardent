@@ -40,8 +40,20 @@
 // than process-wide.
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
-import { ArtifactStore, Journal, JournalLock, type JournalEntry, type JournalOptions } from "./io";
+import {
+  ArtifactStore,
+  EVIDENCE_LOG_NAME,
+  Journal,
+  JournalLock,
+  createJsonlEvidenceSink,
+  readEvidenceLog,
+  type JournalEntry,
+  type JournalOptions,
+  type LockHolder,
+} from "./io";
+import { EvidenceStore } from "./evidence";
 import {
   canTransition,
   commandError,
@@ -53,6 +65,23 @@ import {
   type Scope,
   type SessionBinding,
 } from "./types";
+
+/**
+ * The frozen authorization identity of an engagement: sha256 over the
+ * normalized scope tokens (order-independent) and the authorization reference.
+ *
+ * This is what makes "the config changed on disk" a detectable fact instead of
+ * a silent widening. Two configs with the same targets and sanction produce the
+ * same digest regardless of file order or whitespace; a single added or removed
+ * target, or a new authorization reference, produces a different one.
+ */
+export function authorizationDigest(scope: Scope, authorizationRef: string): string {
+  const canonical = JSON.stringify({
+    authorizationRef: authorizationRef.trim(),
+    targets: scope.entries.map((e) => e.value).sort(),
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
 
 /** The authoritative file inside `<engagementsDir>/<engagementId>/`. */
 const JOURNAL_NAME = "events.jsonl";
@@ -133,6 +162,7 @@ export class EngagementStore {
   private readonly journals = new Map<string, Journal<EngagementEvent>>();
   private readonly locks = new Map<string, JournalLock>();
   private readonly artifactStores = new Map<string, ArtifactStore>();
+  private readonly evidenceStores = new Map<string, EvidenceStore>();
 
   private readonly now: () => number;
   private readonly idFactory: () => string;
@@ -288,6 +318,92 @@ export class EngagementStore {
   }
 
   /**
+   * Every engagement's lock, held by this store or not: the status report an
+   * operator needs before deciding that a lock is stale. Reading a lock is
+   * not touching it.
+   */
+  lockReport(): Array<{ engagementId: string; holder: LockHolder | undefined }> {
+    let ids: string[] = [];
+    try {
+      ids = readdirSync(this.engagementsDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      return [];
+    }
+    return ids.map((engagementId) => {
+      const held = this.locks.get(engagementId);
+      return {
+        engagementId,
+        holder: held?.inspect() ?? new JournalLock(this.lockPathFor(engagementId), { now: this.now }).inspect(),
+      };
+    });
+  }
+
+  /**
+   * Operator recovery for a lock whose holder cannot be alive — the *only*
+   * way a lock is ever removed without its holder releasing it.
+   *
+   * Age proves nothing, so it is never the test. The holder's host is compared
+   * with this one and liveness is asked of the OS; if either cannot be
+   * established (a lock on another host, an unreadable holder) the lock stays
+   * and the refusal says which. Clearing is a command with a result, not a
+   * side effect, and it returns the holder that was cleared so the operator
+   * can see what they overrode.
+   */
+  unlockEngagement(
+    engagementId: string,
+    opts: { hostname?: string; isAlive?: (pid: number) => boolean } = {},
+  ): CommandResult<LockHolder> {
+    const held = this.locks.get(engagementId);
+    if (held !== undefined && held.held) {
+      return commandError(
+        "locked",
+        `engagement ${engagementId} is locked by this process (pid ${process.pid}); close() releases a lock this process owns`,
+      );
+    }
+
+    const lock = new JournalLock(this.lockPathFor(engagementId), { now: this.now });
+    const holder = lock.inspect();
+    if (holder === undefined) {
+      return commandError("not_found", `engagement ${engagementId} has no readable lock at ${lock.path}`);
+    }
+
+    const here = opts.hostname ?? hostname();
+    if (holder.hostname !== here) {
+      return commandError(
+        "locked",
+        `engagement ${engagementId} is held by pid ${holder.pid} on ${holder.hostname}; ` +
+          `liveness cannot be established from ${here}, so the lock stays — clear it on ${holder.hostname}`,
+      );
+    }
+
+    const isAlive =
+      opts.isAlive ??
+      ((pid: number): boolean => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (err) {
+          // EPERM means the pid exists but is not ours to signal: alive.
+          return (err as { code?: string }).code === "EPERM";
+        }
+      });
+    if (isAlive(holder.pid)) {
+      return commandError(
+        "locked",
+        `engagement ${engagementId} is held by pid ${holder.pid} on ${here}, which is still running; ` +
+          `age is not evidence of a dead writer, so the lock stays`,
+      );
+    }
+
+    const cleared = lock.clear();
+    if (!cleared.ok) return commandError(cleared.code, cleared.message);
+    return commandOk(holder, 0);
+  }
+
+  /**
    * Content-addressed bytes for one engagement: `<dir>/artifacts/sha256/…`.
    * An engagement's artifacts are as scoped as its events — evidence about
    * one target never lands in another engagement's tree.
@@ -297,6 +413,33 @@ export class EngagementStore {
     if (existing !== undefined) return existing;
     const store = new ArtifactStore(join(this.engagementDir(engagementId), "artifacts", "sha256"));
     this.artifactStores.set(engagementId, store);
+    return store;
+  }
+
+  /**
+   * One engagement's evidence store: `<dir>/evidence.jsonl`, committed through
+   * this engagement's directory and replayed from it on first use.
+   *
+   * Evidence is owned the same way the engagement's events are — by path, not
+   * by filter. A second engagement gets a second store with its own ids, so it
+   * can neither display nor accept the first one's citations; a resumed
+   * session replays its own log and gets its records, ids and dispositions back
+   * without renumbering.
+   *
+   * The store is created (and its log read) once per engagement per process.
+   * A log that does not replay cleanly yields a DEGRADED store: the good prefix
+   * is still readable in the projection, and every new evidence command is
+   * refused as `storage_unavailable` until the engagement is reopened. Guessing
+   * at the missing records is exactly what a degraded store must not do.
+   */
+  evidenceFor(engagementId: string): EvidenceStore {
+    const existing = this.evidenceStores.get(engagementId);
+    if (existing !== undefined) return existing;
+    const logPath = join(this.engagementDir(engagementId), EVIDENCE_LOG_NAME);
+    const store = new EvidenceStore({ persist: createJsonlEvidenceSink(logPath), now: this.now });
+    const read = readEvidenceLog(logPath);
+    store.replay(read.records, read.fault);
+    this.evidenceStores.set(engagementId, store);
     return store;
   }
 
@@ -328,6 +471,17 @@ export class EngagementStore {
   activeBinding(sessionId: string): SessionBinding | undefined {
     const found = this.bindingRecords.find((b) => b.sessionId === sessionId && b.releasedAt === undefined);
     return found === undefined ? undefined : { ...found };
+  }
+
+  /**
+   * The engagement this session is bound to, or `undefined` — the one question
+   * every surface asks ("may this session work?"), answered from the binding
+   * rather than from a most-recent-engagement or the working directory.
+   * Nothing is inferred: no binding means no engagement, even when one exists.
+   */
+  engagementForSession(sessionId: string): Engagement | undefined {
+    const binding = this.activeBinding(sessionId);
+    return binding === undefined ? undefined : this.#readEngagement(binding.engagementId);
   }
 
   /**
@@ -419,6 +573,7 @@ export class EngagementStore {
       objective,
       authorizationRef,
       scope: input.scope,
+      authorizationDigest: authorizationDigest(input.scope, authorizationRef),
       lifecycle: "draft",
       revision: 1,
       createdAt: ts,
@@ -446,6 +601,49 @@ export class EngagementStore {
     const created = this.#readEngagement(engagement.id);
     if (created === undefined) return commandError("corrupt_store", `engagement ${engagement.id} vanished from the projection`);
     return commandOk(created, committed.revision);
+  }
+
+  /**
+   * The operator's "start": create an engagement from a supplied scope and
+   * authorization, bind the calling session to it *in the same commit as its
+   * creation*, and move it to `active`.
+   *
+   * Two commands with two command ids, because creation and approval are two
+   * different facts: collapsing them would let "approved" ride along with
+   * "made". Both ids are idempotent, so a retry after a timeout returns the
+   * engagement that already exists instead of making a second one, and a
+   * `paused` engagement resumed this way must still hand back its recorded
+   * authorization reference.
+   */
+  startEngagement(input: {
+    createCommandId: string;
+    activateCommandId: string;
+    objective: string;
+    authorizationRef: string;
+    scope: Scope;
+    sessionId: string;
+    actor?: string;
+  }): CommandResult<Engagement> {
+    const created = this.createEngagement({
+      commandId: input.createCommandId,
+      objective: input.objective,
+      authorizationRef: input.authorizationRef,
+      scope: input.scope,
+      sessionId: input.sessionId,
+      ...(input.actor === undefined ? {} : { actor: input.actor }),
+    });
+    if (!created.ok) return created;
+    if (created.value.lifecycle === "active") return created;
+
+    const activated = this.transition({
+      commandId: input.activateCommandId,
+      engagementId: created.value.id,
+      to: "active",
+      authorizationRef: input.authorizationRef,
+      ...(input.actor === undefined ? {} : { actor: input.actor }),
+    });
+    if (!activated.ok) return activated;
+    return commandOk(activated.value, activated.revision);
   }
 
   /**

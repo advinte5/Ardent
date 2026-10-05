@@ -8,7 +8,6 @@ import {
   ARDENT_WORKING_MESSAGE,
   componentFromLines,
   CONT_INDENT,
-  recoveryNoticeLines,
   findingCallLines,
   findingResultLines,
   fitSegments,
@@ -514,19 +513,7 @@ describe("componentFromLines", () => {
   });
 });
 
-describe("recoveryNoticeLines", () => {
-  test("is boxless, indented, and never echoes the model instruction", () => {
-    const lines = recoveryNoticeLines(theme, 120);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]!.startsWith(INDENT)).toBe(true);
-    expect(lines[0]).not.toMatch(FRAME_CHARS);
-    const plainLine = stripTags(lines[0]!);
-    expect(plainLine).toContain("authorization reminder");
-    expect(plainLine).toContain("action gate is unchanged");
-    // The reminder text sent to the model must not be reproduced verbatim.
-    expect(plainLine).not.toContain("The authorized scope for this engagement");
-  });
-
+describe("ARDENT_WORKING_MESSAGE", () => {
   test("the loader message is an Ardent verb, not a bare default", () => {
     expect(ARDENT_WORKING_MESSAGE).toContain("◈");
   });

@@ -40,14 +40,22 @@ export const ARDENT_LINK_TOOL = "ardent_link";
  * what EXECUTED, so it can never be a verification on its own.
  */
 export const ARDENT_SCREENSHOT_TOOL = "ardent_screenshot";
+/**
+ * Make one bounded, scope-checked HTTP exchange and record it as a
+ * runtime-origin observation. This is the captured-execution path (plan P4):
+ * the record is the harness's own capture of the bytes, so unlike a note it CAN
+ * carry a verification. It reaches a target, so `planner` (no network at all)
+ * does not receive it.
+ */
+export const ARDENT_REQUEST_TOOL = "ardent_request";
 
 /**
  * Every Ardent evidence tool, in recording order.
  *
- * `ardent_screenshot` is included here (and so reaches every role that gets
- * the evidence set) because it records rather than concludes. `planner` still
- * does not receive it: a capture makes a network request, and the planner's
- * whole guarantee is that it cannot touch a target.
+ * `ardent_screenshot` and `ardent_request` are included here (and so reach
+ * every role that gets the evidence set) because both record rather than
+ * conclude. `planner` still does not receive them: each reaches a target, and
+ * the planner's whole guarantee is that it cannot.
  */
 export const ARDENT_EVIDENCE_TOOL_NAMES: readonly string[] = [
   ARDENT_NOTE_TOOL,
@@ -55,6 +63,7 @@ export const ARDENT_EVIDENCE_TOOL_NAMES: readonly string[] = [
   ARDENT_VERIFY_TOOL,
   ARDENT_LINK_TOOL,
   ARDENT_SCREENSHOT_TOOL,
+  ARDENT_REQUEST_TOOL,
 ];
 
 /**
@@ -132,9 +141,16 @@ export const AGENT_ROLES: Readonly<Record<ArdentRole, AgentRoleSpec>> = {
   recon: {
     brief:
       "You are RECON. Map what is actually there: hosts, services, versions, names, exposed material. Record every concrete thing you observe with ardent_note, including the target it concerns. Do not assess impact and do not claim vulnerabilities — report what you saw and let the operator judge it.",
-    // Plus the screenshot: a capture is observation, which is exactly recon's
-    // job. It still cannot conclude — no ardent_finding here.
-    tools: [...READ_TOOLS, ...EXEC_TOOLS, ARDENT_NOTE_TOOL, ARDENT_SCREENSHOT_TOOL],
+    // Plus the screenshot and the HTTP adapter: contacting a target and
+    // capturing the result is observation, which is exactly recon's job. It
+    // still cannot conclude — no ardent_finding here.
+    tools: [
+      ...READ_TOOLS,
+      ...EXEC_TOOLS,
+      ARDENT_NOTE_TOOL,
+      ARDENT_SCREENSHOT_TOOL,
+      ARDENT_REQUEST_TOOL,
+    ],
     canRecordFindings: false,
     summary: "observes and records; cannot conclude",
   },
@@ -159,6 +175,7 @@ export const AGENT_ROLES: Readonly<Record<ArdentRole, AgentRoleSpec>> = {
       ARDENT_FINDING_TOOL,
       ARDENT_VERIFY_TOOL,
       ARDENT_SCREENSHOT_TOOL,
+      ARDENT_REQUEST_TOOL,
     ],
     canRecordFindings: true,
     summary: "reproduces candidate findings and rules them",

@@ -3,9 +3,27 @@
 // the "every finding must link to concrete evidence" requirement from the
 // report; a finding with no observations/artifacts is not a finding.
 //
-// Persistence is injected (`persist`): production passes a JSONL appender,
-// tests pass nothing. The store never throws on a persistence failure — a
-// lost audit line must not abort the engagement — but it does surface it.
+// Three rules this module exists to enforce:
+//
+//   1. Commit before projecting. A record is written durably FIRST and only
+//      then enters the in-memory projection. A store that pushes to memory and
+//      then fails the write reports success over a record that does not exist
+//      on disk; the operator's counts and the report would both be fiction.
+//      A failed write therefore returns a typed refusal and puts nothing in
+//      the projection — the bytes are kept aside as SALVAGE (see `salvage`),
+//      which is explicitly not report evidence.
+//   2. Provenance decides proof. Recorded `passed: true` is a claim; only proof
+//      the harness captured itself (a `runtime`-origin observation, or a
+//      non-screenshot artifact written by the capture path) can carry a
+//      verdict. A model-authored note plus `passed: true` is recorded as an
+//      `unvalidated` attempt and moves nothing.
+//   3. Ownership is resumable. `replay` rebuilds the projection from a log and
+//      re-derives every verification outcome under the rules above, so
+//      resuming a session cannot resurrect a label that the current rules do
+//      not support — and new ids never collide with imported ones.
+//
+// Persistence is injected (`persist`): production passes a JSONL appender into
+// the bound engagement's own directory, tests pass nothing.
 import type {
   Artifact,
   ArtifactKind,
@@ -15,13 +33,14 @@ import type {
   Hypothesis,
   HypothesisStatus,
   Observation,
+  RecordOrigin,
   Relation,
   RelationKind,
   Severity,
   Verification,
   VerificationOutcome,
 } from "./types";
-import { maxSeverity } from "./types";
+import { isRuntimeOrigin, maxSeverity } from "./types";
 
 /** A maximal chain of `enables` edges, entry first. */
 export interface AttackPath {
@@ -41,11 +60,17 @@ export interface EvidencePersist {
  * Why a domain command was refused, as a code the tool layer and the UI can
  * branch on without parsing prose. The meanings mirror the command/error
  * contract in the engagement plan: `validation` for malformed input,
- * `foreign_reference` for an id this store never issued, `not_found` for a
- * missing primary record, and `missing_citation` for a claim with no evidence
- * to stand on.
+ * `foreign_reference` for an id this engagement never issued, `not_found` for
+ * a missing primary record, `missing_citation` for a claim with no evidence to
+ * stand on, and `storage_unavailable` for a record that could not be committed
+ * durably (nothing was recorded).
  */
-export type EvidenceErrorCode = "validation" | "foreign_reference" | "not_found" | "missing_citation";
+export type EvidenceErrorCode =
+  | "validation"
+  | "foreign_reference"
+  | "not_found"
+  | "missing_citation"
+  | "storage_unavailable";
 
 export interface EvidenceRejection {
   ok: false;
@@ -57,6 +82,9 @@ function reject(code: EvidenceErrorCode, error: string): EvidenceRejection {
   return { ok: false, code, error };
 }
 
+/** One error code that means "this was never committed", for callers to branch on. */
+export const EVIDENCE_STORAGE_CODE: EvidenceErrorCode = "storage_unavailable";
+
 export type EvidenceRecord =
   | { kind: "observation"; value: Observation }
   | { kind: "hypothesis"; value: Hypothesis }
@@ -65,10 +93,74 @@ export type EvidenceRecord =
   | { kind: "finding"; value: Finding }
   | { kind: "relation"; value: Relation };
 
+const RECORD_KINDS: readonly EvidenceRecord["kind"][] = [
+  "observation",
+  "hypothesis",
+  "artifact",
+  "verification",
+  "finding",
+  "relation",
+];
+
+/**
+ * Structural check for one parsed log line. Deliberately shallow: it answers
+ * "is this one of our records at all", which is what tells a truncated or
+ * corrupted line apart from a readable one. The store re-derives the parts
+ * that carry authority (outcomes, statuses) rather than trusting the file.
+ */
+export function isEvidenceRecord(value: unknown): value is EvidenceRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { kind?: unknown; value?: unknown };
+  if (typeof candidate.kind !== "string") return false;
+  if (!RECORD_KINDS.includes(candidate.kind as EvidenceRecord["kind"])) return false;
+  const record = candidate.value as { id?: unknown } | undefined;
+  return typeof record === "object" && record !== null && typeof record.id === "string";
+}
+
 export interface EvidenceStoreOptions {
   persist?: EvidencePersist;
   /** Injected clock for deterministic tests. */
   now?: () => number;
+}
+
+export interface ReplayReport {
+  /** Records that entered the projection. */
+  imported: number;
+  /** Records dropped because they could not be interpreted. */
+  discarded: number;
+  /** Why something was dropped, when something was. Blocks new evidence work. */
+  fault?: string;
+}
+
+/**
+ * The outcome an attempt actually earned, from the proof it cites.
+ *
+ * Order matters. An attempt with no proof is `unvalidated`; so is an attempt
+ * whose proof is entirely model-authored, because "the model says a file
+ * proves it" is the same say-so with a file name attached. Only once proof came
+ * from the harness does a supplied `passed`/`inconclusive` decide the verdict —
+ * and it still cannot upgrade an unvalidated claim.
+ */
+export function deriveOutcome(input: {
+  /** How many proof ids the attempt cited at all. */
+  proofCount: number;
+  /** True when at least one cited id is harness-captured proof. */
+  hasRuntimeProof: boolean;
+  passed: boolean;
+  inconclusive?: boolean;
+}): VerificationOutcome {
+  if (input.proofCount === 0) return "unvalidated";
+  if (!input.hasRuntimeProof) return "unvalidated";
+  if (input.inconclusive) return "inconclusive";
+  return input.passed ? "supported" : "refuted";
+}
+
+/** Apply an outcome to a finding, leaving it untouched when nothing was proven. */
+function applyOutcome(finding: Finding, outcome: VerificationOutcome): void {
+  if (outcome === "supported") finding.status = "verified";
+  else if (outcome === "refuted") finding.status = "refuted";
+  else if (outcome === "inconclusive") finding.status = "inconclusive";
+  // `unvalidated` deliberately leaves `finding.status` untouched.
 }
 
 export class EvidenceStore {
@@ -83,15 +175,18 @@ export class EvidenceStore {
   private readonly now: () => number;
   private seq = 0;
   /**
-   * Sticky: set when a durable write threw, cleared only by construction.
+   * Sticky: set when a durable write threw (or when a replay found records it
+   * could not interpret), cleared only by construction.
    *
    * A later success does NOT clear it — the record that failed is still
    * missing from the file, and reporting "all clear" because the *next* write
    * landed would be exactly the lie this flag exists to prevent. Once a write
-   * has failed, the store is degraded until it is rebuilt from memory or
-   * reopened against a working device.
+   * has failed, the store is degraded until the engagement is reopened against
+   * a working device.
    */
   private persistError: string | undefined;
+  /** Uncommitted records, kept for an operator to recover — never as evidence. */
+  private readonly salvageRecords: EvidenceRecord[] = [];
 
   constructor(opts: EvidenceStoreOptions = {}) {
     this.persist = opts.persist;
@@ -101,7 +196,7 @@ export class EvidenceStore {
   /**
    * True when the in-memory record and the durable record have diverged.
    * Anything reporting evidence counts should say so: "3 verified" is only
-   * true of what is in memory until the journal is known to hold it too.
+   * true of what is in memory until the log is known to hold it too.
    */
   get degraded(): boolean {
     return this.persistError !== undefined;
@@ -112,37 +207,217 @@ export class EvidenceStore {
     return this.persistError;
   }
 
+  /**
+   * Records whose durable write failed. They are held so nothing is silently
+   * dropped, and they are labelled salvage on every surface: they are not in
+   * the projection, not citable, and not report evidence. Their only use is
+   * manual recovery once the device works again.
+   */
+  get salvage(): readonly EvidenceRecord[] {
+    return this.salvageRecords;
+  }
+
+  get salvageCount(): number {
+    return this.salvageRecords.length;
+  }
+
   private nextId(prefix: string): string {
     this.seq += 1;
     return `${prefix}-${this.seq}`;
   }
 
-  private emit(record: EvidenceRecord): void {
-    if (!this.persist) return;
+  /**
+   * Commit a record durably, then let the caller project it. Returns the typed
+   * refusal when the write failed — in which case nothing was committed, the
+   * store is degraded for the rest of the process, and the record is retained
+   * as salvage.
+   *
+   * A degraded store refuses outright rather than retrying: it is already
+   * known to have lost a record, so the honest answer to "record this too" is
+   * no, not "let us see if this one sticks".
+   */
+  private commit(record: EvidenceRecord): EvidenceRejection | undefined {
+    if (this.persistError !== undefined) {
+      return reject("storage_unavailable", `evidence store is degraded (${this.persistError})`);
+    }
+    if (this.persist === undefined) return undefined;
     try {
       this.persist(record);
+      return undefined;
     } catch (err) {
-      // The engagement keeps running (a lost audit line must not abort it),
-      // but the store is now telling the truth about having lost it.
-      this.persistError = err instanceof Error ? err.message : String(err);
+      const why = err instanceof Error ? err.message : String(err);
+      this.persistError = why;
+      this.salvageRecords.push(record);
+      return reject("storage_unavailable", `evidence write failed: ${why}`);
     }
   }
 
-  addObservation(input: { source: string; summary: string; target?: string; raw?: string }): Observation {
+  /** Keep the id counter above everything already issued, so ids never collide. */
+  private bumpSeq(id: string): void {
+    const match = /-(\d+)$/.exec(id);
+    if (match === null) return;
+    const n = Number(match[1]);
+    if (Number.isFinite(n) && n > this.seq) this.seq = n;
+  }
+
+  /**
+   * Rebuild the projection from committed records: the resume path (plan
+   * checkpoint 2) and the only way a previous process's ids and dispositions
+   * come back.
+   *
+   * Every verification's outcome is RE-DERIVED here under the current rules
+   * rather than copied from the file. That is deliberately one-directional: a
+   * record written under weaker rules can be downgraded to `unvalidated`, and
+   * nothing is ever upgraded to a verdict the cited proof does not support. The
+   * imported records are the same ids with re-derived dispositions, never new
+   * ones, so a resumed session's citations keep resolving.
+   *
+   * A record that cannot be interpreted (unknown reference, malformed shape)
+   * is discarded and marks the store degraded: refusing to guess which records
+   * are missing is the honest response to a log that does not add up.
+   */
+  replay(records: readonly EvidenceRecord[], fault?: string): ReplayReport {
+    const problems: string[] = [];
+    let imported = 0;
+    let discarded = 0;
+    const drop = (why: string): void => {
+      discarded += 1;
+      problems.push(why);
+    };
+
+    for (const record of records) {
+      switch (record.kind) {
+        case "observation": {
+          const value: Observation = { ...record.value, origin: record.value.origin ?? "model" };
+          this.observations.push(value);
+          this.bumpSeq(value.id);
+          imported += 1;
+          break;
+        }
+        case "hypothesis": {
+          const value: Hypothesis = { ...record.value, observationIds: [...record.value.observationIds] };
+          this.hypotheses.push(value);
+          this.bumpSeq(value.id);
+          imported += 1;
+          break;
+        }
+        case "artifact": {
+          const value: Artifact = { ...record.value, origin: record.value.origin ?? "model" };
+          this.artifacts.push(value);
+          this.bumpSeq(value.id);
+          imported += 1;
+          break;
+        }
+        case "finding": {
+          const value: Finding = {
+            ...record.value,
+            observationIds: [...record.value.observationIds],
+            artifactIds: [...record.value.artifactIds],
+            // Starts at `candidate` on purpose: a disposition is re-derived
+            // from the verification records that follow, never read back from
+            // the file. A status written under weaker rules is therefore not
+            // resurrected by replay (checked in evidence.test.ts).
+            verificationIds: [],
+            status: "candidate",
+          };
+          this.findings.push(value);
+          this.bumpSeq(value.id);
+          imported += 1;
+          break;
+        }
+        case "relation": {
+          const value: Relation = { ...record.value };
+          this.relations.push(value);
+          this.bumpSeq(value.id);
+          imported += 1;
+          break;
+        }
+        case "verification": {
+          const finding = this.findings.find((f) => f.id === record.value.findingId);
+          if (finding === undefined) {
+            drop(`verification ${record.value.id} names unknown finding ${record.value.findingId}`);
+            break;
+          }
+          const unknown = record.value.proofIds.filter(
+            (id) => !this.observations.some((o) => o.id === id) && !this.artifacts.some((a) => a.id === id),
+          );
+          if (unknown.length > 0) {
+            drop(`verification ${record.value.id} cites unknown proof: ${unknown.join(", ")}`);
+            break;
+          }
+          const proofObservationIds = record.value.proofIds.filter((id) => this.observations.some((o) => o.id === id));
+          const proofArtifactIds = record.value.proofIds.filter((id) => this.artifacts.some((a) => a.id === id));
+          const outcome = deriveOutcome({
+            proofCount: record.value.proofIds.length,
+            hasRuntimeProof: this.#hasRuntimeProof(proofObservationIds, proofArtifactIds),
+            passed: record.value.passed,
+            ...(record.value.outcome === "inconclusive" ? { inconclusive: true } : {}),
+          });
+          const value: Verification = { ...record.value, outcome, proofIds: [...record.value.proofIds] };
+          this.verifications.push(value);
+          finding.verificationIds.push(value.id);
+          applyOutcome(finding, outcome);
+          this.bumpSeq(value.id);
+          imported += 1;
+          break;
+        }
+      }
+    }
+
+    const why = fault ?? (problems.length === 0 ? undefined : problems.join("; "));
+    if (why !== undefined && this.persistError === undefined) {
+      // A replay fault is a durability fault: the engagement's record cannot be
+      // trusted whole, so nothing new is accepted until it is reopened.
+      this.persistError = `evidence log did not replay cleanly: ${why}`;
+    }
+    return {
+      imported,
+      discarded,
+      ...(why === undefined ? {} : { fault: why }),
+    };
+  }
+
+  /**
+   * Is any cited proof something the harness captured itself?
+   *
+   * A screenshot is excluded even when the harness wrote its bytes: it shows
+   * what rendered, not what executed, so it corroborates but cannot carry a
+   * verdict (see addVerification).
+   */
+  #hasRuntimeProof(observationIds: readonly string[], artifactIds: readonly string[]): boolean {
+    if (observationIds.some((id) => isRuntimeOrigin(this.observations.find((o) => o.id === id) ?? {}))) {
+      return true;
+    }
+    return artifactIds.some((id) => {
+      const artifact = this.artifacts.find((a) => a.id === id);
+      return artifact !== undefined && isRuntimeOrigin(artifact) && artifact.kind !== "screenshot";
+    });
+  }
+
+  addObservation(input: {
+    source: string;
+    summary: string;
+    target?: string;
+    raw?: string;
+    /** Defaults to `model`; only the harness sets `runtime`. */
+    origin?: RecordOrigin;
+  }): { ok: true; observation: Observation } | EvidenceRejection {
     const value: Observation = {
       id: this.nextId("obs"),
       ts: this.now(),
       source: input.source,
       summary: input.summary,
+      origin: input.origin ?? "model",
       ...(input.target === undefined ? {} : { target: input.target }),
       ...(input.raw === undefined ? {} : { raw: input.raw }),
     };
+    const failure = this.commit({ kind: "observation", value });
+    if (failure !== undefined) return failure;
     this.observations.push(value);
-    this.emit({ kind: "observation", value });
-    return value;
+    return { ok: true, observation: value };
   }
 
-  addHypothesis(input: { statement: string; observationIds?: string[] }): Hypothesis {
+  addHypothesis(input: { statement: string; observationIds?: string[] }): { ok: true; hypothesis: Hypothesis } | EvidenceRejection {
     const value: Hypothesis = {
       id: this.nextId("hyp"),
       ts: this.now(),
@@ -150,9 +425,10 @@ export class EvidenceStore {
       observationIds: input.observationIds ? [...input.observationIds] : [],
       status: "open",
     };
+    const failure = this.commit({ kind: "hypothesis", value });
+    if (failure !== undefined) return failure;
     this.hypotheses.push(value);
-    this.emit({ kind: "hypothesis", value });
-    return value;
+    return { ok: true, hypothesis: value };
   }
 
   setHypothesisStatus(id: string, status: HypothesisStatus): boolean {
@@ -169,26 +445,30 @@ export class EvidenceStore {
     sha256?: string;
     kind?: ArtifactKind;
     target?: string;
-  }): Artifact {
+    /** Defaults to `model`; the capture path sets `runtime`. */
+    origin?: RecordOrigin;
+  }): { ok: true; artifact: Artifact } | EvidenceRejection {
     const value: Artifact = {
       id: this.nextId("art"),
       ts: this.now(),
       path: input.path,
       producedBy: input.producedBy,
       description: input.description,
+      origin: input.origin ?? "model",
       ...(input.sha256 === undefined ? {} : { sha256: input.sha256 }),
       ...(input.kind === undefined ? {} : { kind: input.kind }),
       ...(input.target === undefined ? {} : { target: input.target }),
     };
+    const failure = this.commit({ kind: "artifact", value });
+    if (failure !== undefined) return failure;
     this.artifacts.push(value);
-    this.emit({ kind: "artifact", value });
-    return value;
+    return { ok: true, artifact: value };
   }
 
   /**
-   * Record a candidate finding. Every id supplied must already exist in the
-   * store, otherwise the call fails — this is what stops an unsourced finding
-   * from entering the report.
+   * Record a candidate finding. Every id supplied must already exist in this
+   * engagement, otherwise the call fails — this is what stops an unsourced
+   * finding from entering the report.
    *
    * Citations are strict: a finding must cite at least one observation or
    * artifact. An empty citation list is the same claim with the support
@@ -203,7 +483,6 @@ export class EvidenceStore {
     description: string;
     observationIds?: string[];
     artifactIds?: string[];
-    status?: FindingStatus;
   }): { ok: true; finding: Finding } | EvidenceRejection {
     const observationIds = input.observationIds ?? [];
     const artifactIds = input.artifactIds ?? [];
@@ -236,22 +515,24 @@ export class EvidenceStore {
       observationIds: [...observationIds],
       artifactIds: [...artifactIds],
       verificationIds: [],
-      status: input.status ?? "candidate",
+      status: "candidate",
     };
+    const failure = this.commit({ kind: "finding", value });
+    if (failure !== undefined) return failure;
     this.findings.push(value);
-    this.emit({ kind: "finding", value });
     return { ok: true, finding: value };
   }
 
   /**
    * Record a verification and apply its outcome to the linked finding.
    *
-   * The finding only moves when the attempt carries proof. `passed: true`
-   * plus a prose method is a model's say-so, not a result: it is recorded
-   * with outcome `unvalidated` and the finding stays exactly where it was,
-   * which is what stops a worker promoting its own candidate by asserting a
-   * boolean. A test that ran but could not discriminate is `inconclusive` —
-   * a real, reportable result that is specifically not `refuted`.
+   * The finding only moves when the attempt cites proof THE HARNESS CAPTURED.
+   * `passed: true` plus prose — or plus a model-authored note — is a model's
+   * say-so, not a result: it is recorded with outcome `unvalidated` and the
+   * finding stays exactly where it was, which is what stops a worker promoting
+   * its own candidate by asserting a boolean. A test that ran but could not
+   * discriminate is `inconclusive` — a real, reportable result that is
+   * specifically not `refuted`.
    */
   addVerification(input: {
     findingId: string;
@@ -263,7 +544,9 @@ export class EvidenceStore {
     proof?: { observationIds?: string[]; artifactIds?: string[] };
     /** Set when the attempt ran but could not discriminate either way. */
     inconclusive?: boolean;
-  }): { ok: true; verification: Verification; finding: Finding; promoted: boolean } | EvidenceRejection {
+  }):
+    | { ok: true; verification: Verification; finding: Finding; promoted: boolean }
+    | EvidenceRejection {
     const finding = this.findings.find((f) => f.id === input.findingId);
     if (!finding) return reject("not_found", `unknown finding id: ${input.findingId}`);
     const proofObservationIds = input.proof?.observationIds ?? [];
@@ -277,28 +560,25 @@ export class EvidenceStore {
     }
     const proofIds = [...proofObservationIds, ...proofArtifactIds];
     // A screenshot shows what rendered, not what executed. Proof consisting
-    // only of captures therefore cannot carry a verdict: the deterministic
-    // signal (DOM state, console output, request/response bytes) has to be
-    // recorded as an observation, or as a non-image artifact, alongside the
-    // image.
+    // only of captures therefore cannot carry a verdict at all: the
+    // deterministic signal has to be captured as a runtime observation, or as
+    // a non-image artifact, alongside the image.
     const hasSubstantiveProof =
       proofObservationIds.length > 0 ||
       proofArtifactIds.some((id) => this.artifacts.find((a) => a.id === id)?.kind !== "screenshot");
     if (proofIds.length > 0 && !hasSubstantiveProof) {
       return reject(
         "validation",
-        "a screenshot alone cannot carry a verification; cite the observation holding the deterministic signal (DOM state, console output, request/response) as proof",
+        "a screenshot alone cannot carry a verification; cite the captured signal (DOM state, console output, request/response) as proof",
       );
     }
-    // The outcome is derived from the proof, never from `passed` alone.
-    const outcome: VerificationOutcome =
-      proofIds.length === 0
-        ? "unvalidated"
-        : input.inconclusive
-          ? "inconclusive"
-          : input.passed
-            ? "supported"
-            : "refuted";
+    // The outcome is derived from provenance and proof, never from `passed`.
+    const outcome = deriveOutcome({
+      proofCount: proofIds.length,
+      hasRuntimeProof: this.#hasRuntimeProof(proofObservationIds, proofArtifactIds),
+      passed: input.passed,
+      ...(input.inconclusive === undefined ? {} : { inconclusive: input.inconclusive }),
+    });
     const value: Verification = {
       id: this.nextId("ver"),
       ts: this.now(),
@@ -310,13 +590,11 @@ export class EvidenceStore {
       proofIds,
       ...(input.notes === undefined ? {} : { notes: input.notes }),
     };
+    const failure = this.commit({ kind: "verification", value });
+    if (failure !== undefined) return failure;
     this.verifications.push(value);
     finding.verificationIds.push(value.id);
-    if (outcome === "supported") finding.status = "verified";
-    else if (outcome === "refuted") finding.status = "refuted";
-    else if (outcome === "inconclusive") finding.status = "inconclusive";
-    // `unvalidated` deliberately leaves `finding.status` untouched.
-    this.emit({ kind: "verification", value });
+    applyOutcome(finding, outcome);
     return {
       ok: true,
       verification: value,
@@ -342,17 +620,17 @@ export class EvidenceStore {
    */
   addRelation(input: { from: string; to: string; kind: RelationKind; note?: string }):
     | { ok: true; relation: Relation }
-    | { ok: false; error: string } {
+    | EvidenceRejection {
     const from = this.findings.find((f) => f.id === input.from);
-    if (!from) return { ok: false, error: `unknown finding id: ${input.from}` };
+    if (!from) return reject("foreign_reference", `unknown finding id: ${input.from}`);
     const to = this.findings.find((f) => f.id === input.to);
-    if (!to) return { ok: false, error: `unknown finding id: ${input.to}` };
-    if (from.id === to.id) return { ok: false, error: "a finding cannot bear on itself" };
+    if (!to) return reject("foreign_reference", `unknown finding id: ${input.to}`);
+    if (from.id === to.id) return reject("validation", "a finding cannot bear on itself");
     if (this.relations.some((r) => r.from === from.id && r.to === to.id && r.kind === input.kind)) {
-      return { ok: false, error: `already recorded: ${from.id} ${input.kind} ${to.id}` };
+      return reject("validation", `already recorded: ${from.id} ${input.kind} ${to.id}`);
     }
     if (input.kind === "enables" && this.reaches(input.to, input.from)) {
-      return { ok: false, error: `${from.id} ${input.kind} ${to.id} would create a cycle` };
+      return reject("validation", `${from.id} ${input.kind} ${to.id} would create a cycle`);
     }
     const value: Relation = {
       id: this.nextId("rel"),
@@ -362,8 +640,9 @@ export class EvidenceStore {
       kind: input.kind,
       ...(input.note === undefined ? {} : { note: input.note }),
     };
+    const failure = this.commit({ kind: "relation", value });
+    if (failure !== undefined) return failure;
     this.relations.push(value);
-    this.emit({ kind: "relation", value });
     return { ok: true, relation: value };
   }
 
